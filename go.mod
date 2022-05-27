@@ -67,7 +67,7 @@ require (
 	github.com/termie/go-shutil v0.0.0-20140729215957-bcacb06fecae
 	github.com/vishvananda/netlink v1.2.0-beta.0.20220404152918-5e915e014938
 	go.etcd.io/etcd/api/v3 v3.5.2
-	go.etcd.io/etcd/client/pkg/v3 v3.5.2
+	go.etcd.io/etcd/client/pkg/v3 v3.5.4
 	go.etcd.io/etcd/client/v2 v2.305.2
 	go.etcd.io/etcd/client/v3 v3.5.1
 	golang.org/x/net v0.0.0-20220412020605-290c469a71a5
