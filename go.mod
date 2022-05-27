@@ -22,7 +22,7 @@ require (
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/envoyproxy/go-control-plane v0.9.9-0.20210512163311-63b5d3c536b0
 	github.com/ghodss/yaml v1.0.0
-	github.com/go-ini/ini v1.63.2
+	github.com/go-ini/ini v1.66.4
 	github.com/gofrs/flock v0.8.0
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang-collections/collections v0.0.0-20130729185459-604e922904d3
