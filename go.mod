@@ -29,7 +29,7 @@ require (
 	github.com/golang/protobuf v1.5.2
 	github.com/google/gopacket v1.1.19
 	github.com/google/netstack v0.0.0-20191123085552-55fcc16cd0eb
-	github.com/google/uuid v1.2.0
+	github.com/google/uuid v1.3.0
 	github.com/howeyc/fsnotify v0.9.0
 	github.com/ishidawataru/sctp v0.0.0-20191218070446-00ab2ac2db07
 	github.com/joho/godotenv v1.4.0
