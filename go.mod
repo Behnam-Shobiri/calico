@@ -15,7 +15,7 @@ require (
 	github.com/buger/jsonparser v1.1.1
 	github.com/container-storage-interface/spec v1.5.0
 	github.com/containernetworking/cni v1.0.1
-	github.com/containernetworking/plugins v1.0.1
+	github.com/containernetworking/plugins v1.1.1
 	github.com/coreos/go-semver v0.3.0
 	github.com/davecgh/go-spew v1.1.1
 	github.com/distribution/distribution v2.8.1+incompatible
@@ -136,7 +136,7 @@ require (
 	github.com/cilium/ebpf v0.6.2 // indirect
 	github.com/clusterhq/flocker-go v0.0.0-20160920122132-2b8b7259d313 // indirect
 	github.com/cncf/xds/go v0.0.0-20210312221358-fbca930ec8ed // indirect
-	github.com/containerd/cgroups v0.0.0-20190919134610-bf292b21730f // indirect
+	github.com/containerd/cgroups v1.0.1 // indirect
 	github.com/containerd/console v1.0.2 // indirect
 	github.com/containerd/containerd v1.4.11 // indirect
 	github.com/containerd/ttrpc v1.0.2 // indirect
