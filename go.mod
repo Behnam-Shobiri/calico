@@ -90,7 +90,7 @@ require (
 	k8s.io/kube-openapi v0.0.0-20220124234850-424119656bbf
 	k8s.io/kubernetes v0.0.0-00010101000000-000000000000
 	k8s.io/utils v0.0.0-20211208161948-7d6a63dca704
-	modernc.org/memory v1.0.5
+	modernc.org/memory v1.1.1
 	sigs.k8s.io/kind v0.11.1
 )
 
