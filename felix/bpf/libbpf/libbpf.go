@@ -36,8 +36,6 @@ type Map struct {
 	bpfObj *C.struct_bpf_object
 }
 
-const MapTypeProgrArray = C.BPF_MAP_TYPE_PROG_ARRAY
-
 type QdiskHook string
 
 const (
@@ -256,6 +254,7 @@ func TcSetGlobals(
 	psNatLen uint16,
 	hostTunnelIP uint32,
 	flags uint32,
+	wgPort uint16,
 ) error {
 	_, err := C.bpf_tc_set_globals(m.bpfMap,
 		C.uint(hostIP),
@@ -267,6 +266,7 @@ func TcSetGlobals(
 		C.ushort(psNatLen),
 		C.uint(hostTunnelIP),
 		C.uint(flags),
+		C.ushort(wgPort),
 	)
 
 	return err
