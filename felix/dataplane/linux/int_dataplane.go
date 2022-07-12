@@ -180,6 +180,7 @@ type Config struct {
 	ExternalNodesCidrs []string
 
 	BPFEnabled                         bool
+	BPFPolicyDebugEnabled              bool
 	BPFDisableUnprivileged             bool
 	BPFKubeProxyIptablesCleanupEnabled bool
 	BPFLogLevel                        string
@@ -199,6 +200,7 @@ type Config struct {
 	BPFMapSizeNATBackend               int
 	BPFMapSizeNATAffinity              int
 	BPFMapSizeIPSets                   int
+	BPFMapSizeIfState                  int
 	BPFIpv6Enabled                     bool
 	BPFHostConntrackBypass             bool
 	BPFEnforceRPF                      string
@@ -386,6 +388,13 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 		log.Info("BPF enabled, configuring iptables layer to clean up kube-proxy's rules.")
 		iptablesOptions.ExtraCleanupRegexPattern = rules.KubeProxyInsertRuleRegex
 		iptablesOptions.HistoricChainPrefixes = append(iptablesOptions.HistoricChainPrefixes, rules.KubeProxyChainPrefixes...)
+	}
+
+	if config.BPFEnabled && !config.BPFPolicyDebugEnabled {
+		err := os.RemoveAll(bpf.RuntimePolDir)
+		if err != nil && !os.IsNotExist(err) {
+			log.WithError(err).Info("Policy debug disabled but failed to remove the debug directory.  Ignoring.")
+		}
 	}
 
 	// However, the NAT tables need an extra cleanup regex.
@@ -588,8 +597,16 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 		defaultRPFilter = []byte{'1'}
 	}
 
-	bpfMapContext := bpfmap.CreateBPFMapContext(config.BPFMapSizeIPSets, config.BPFMapSizeNATFrontend,
-		config.BPFMapSizeNATBackend, config.BPFMapSizeNATAffinity, config.BPFMapSizeRoute, config.BPFMapSizeConntrack, config.BPFMapRepin)
+	bpfMapContext := bpfmap.CreateBPFMapContext(
+		config.BPFMapSizeIPSets,
+		config.BPFMapSizeNATFrontend,
+		config.BPFMapSizeNATBackend,
+		config.BPFMapSizeNATAffinity,
+		config.BPFMapSizeRoute,
+		config.BPFMapSizeConntrack,
+		config.BPFMapSizeIfState,
+		config.BPFMapRepin,
+	)
 
 	var bpfEndpointManager *bpfEndpointManager
 
@@ -1362,6 +1379,16 @@ func (d *InternalDataplane) setUpIptablesBPF() {
 				Action: iptables.DropAction{},
 			})
 		}
+
+		// Accept any SEEN packets that go to the host. What remains here should be from
+		// host interfaces. This should accept packets in default-DROP iptable
+		// environments.  Such packets go through BPF on host iface but must go through
+		// the INPUT of iptables too. default-DROP would block IPIP/VXLAN/WG/etc. traffic
+		// without explicit ACCEPT.
+		inputRules = append(inputRules, iptables.Rule{
+			Match:  iptables.Match().MarkMatchesWithMask(tcdefs.MarkSeen, tcdefs.MarkSeenMask),
+			Action: iptables.AcceptAction{},
+		})
 
 		if t.IPVersion == 6 {
 			for _, prefix := range rulesConfig.WorkloadIfacePrefixes {
