@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2022 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -87,21 +87,22 @@ var (
 
 	// Offsets within the cal_tc_state struct.
 	// WARNING: must be kept in sync with the definitions in bpf/include/jump.h.
-	stateOffIPSrc          int16 = stateEventHdrSize + 0
-	stateOffIPDst          int16 = stateEventHdrSize + 4
-	_                            = stateOffIPDst
-	stateOffPreNATIPDst    int16 = stateEventHdrSize + 8
-	_                            = stateOffPreNATIPDst
-	stateOffPostNATIPDst   int16 = stateEventHdrSize + 12
-	stateOffPolResult      int16 = stateEventHdrSize + 20
-	stateOffSrcPort        int16 = stateEventHdrSize + 24
-	stateOffDstPort        int16 = stateEventHdrSize + 26
-	stateOffICMPType             = stateOffDstPort
-	stateOffPreNATDstPort  int16 = stateEventHdrSize + 28
-	_                            = stateOffPreNATDstPort
-	stateOffPostNATDstPort int16 = stateEventHdrSize + 30
-	stateOffIPProto        int16 = stateEventHdrSize + 32
-	stateOffFlags          int16 = stateEventHdrSize + 33
+	stateOffIPSrc          = FieldOffset{Offset: stateEventHdrSize + 0, Field: "state->ip_src"}
+	stateOffIPDst          = FieldOffset{Offset: stateEventHdrSize + 4, Field: "state->ip_dst"}
+	_                      = stateOffIPDst
+	stateOffPreNATIPDst    = FieldOffset{Offset: stateEventHdrSize + 8, Field: "state->pre_nat_ip_dst"}
+	_                      = stateOffPreNATIPDst
+	stateOffPostNATIPDst   = FieldOffset{Offset: stateEventHdrSize + 12, Field: "state->post_nat_ip_dst"}
+	stateOffPolResult      = FieldOffset{Offset: stateEventHdrSize + 20, Field: "state->pol_rc"}
+	stateOffSrcPort        = FieldOffset{Offset: stateEventHdrSize + 24, Field: "state->sport"}
+	stateOffDstPort        = FieldOffset{Offset: stateEventHdrSize + 26, Field: "state->dport"}
+	_                      = stateOffDstPort
+	stateOffICMPType       = FieldOffset{Offset: stateEventHdrSize + 26, Field: "state->icmp_type"}
+	stateOffPreNATDstPort  = FieldOffset{Offset: stateEventHdrSize + 28, Field: "state->pre_nat_dport"}
+	_                      = stateOffPreNATDstPort
+	stateOffPostNATDstPort = FieldOffset{Offset: stateEventHdrSize + 30, Field: "state->post_nat_dport"}
+	stateOffIPProto        = FieldOffset{Offset: stateEventHdrSize + 32, Field: "state->ip_proto"}
+	stateOffFlags          = FieldOffset{Offset: stateEventHdrSize + 33, Field: "state->flags"}
 
 	// Compile-time check that IPSetEntrySize hasn't changed; if it changes, the code will need to change.
 	_ = [1]struct{}{{}}[20-ipsets.IPSetEntrySize]
@@ -305,18 +306,17 @@ func (p *Builder) writeProgramFooter(forXDP bool) {
 	p.b.MovImm32(R1, int32(state.PolicyDeny))
 	p.b.Store32(R9, R1, stateOffPolResult)
 
+	// Execute the tail call to drop program
+	p.b.Mov64(R1, R6)                      // First arg is the context.
+	p.b.LoadMapFD(R2, uint32(p.jumpMapFD)) // Second arg is the map.
+	p.b.MovImm32(R3, jumpIdxDrop)          // Third arg is the index (rather than a pointer to the index).
+	p.b.Call(HelperTailCall)
+
+	// Fall through if tail call fails.
+	p.b.LabelNextInsn("exit")
 	if forXDP {
-		p.b.LabelNextInsn("exit")
 		p.b.MovImm64(R0, 1 /* XDP_DROP */)
 	} else {
-		// Execute the tail call to drop program
-		p.b.Mov64(R1, R6)                      // First arg is the context.
-		p.b.LoadMapFD(R2, uint32(p.jumpMapFD)) // Second arg is the map.
-		p.b.MovImm32(R3, jumpIdxDrop)          // Third arg is the index (rather than a pointer to the index).
-		p.b.Call(HelperTailCall)
-
-		// Fall through if tail call fails.
-		p.b.LabelNextInsn("exit")
 		p.b.MovImm64(R0, 2 /* TC_ACT_SHOT */)
 	}
 	p.b.Exit()
@@ -341,12 +341,16 @@ func (p *Builder) writeProgramFooter(forXDP bool) {
 		// Fall through if tail call fails.
 		p.b.MovImm32(R1, state.PolicyTailCallFailed)
 		p.b.Store32(R9, R1, stateOffPolResult)
-		p.b.MovImm64(R0, 2 /* TC_ACT_SHOT */)
+		if forXDP {
+			p.b.MovImm64(R0, 1 /* XDP_DROP */)
+		} else {
+			p.b.MovImm64(R0, 2 /* TC_ACT_SHOT */)
+		}
 		p.b.Exit()
 	}
 }
 
-func (p *Builder) setUpIPSetKey(ipsetID uint64, keyOffset, ipOffset, portOffset int16) {
+func (p *Builder) setUpIPSetKey(ipsetID uint64, keyOffset int16, ipOffset, portOffset FieldOffset) {
 	// TODO track whether we've already done an initialisation and skip the parts that don't change.
 	// Zero the padding.
 	p.b.MovImm64(R1, 0) // R1 = 0
@@ -459,7 +463,7 @@ const (
 	legDestPreNAT matchLeg = "destPreNAT"
 )
 
-func (leg matchLeg) offsetToStateIPAddressField() (offset int16) {
+func (leg matchLeg) offsetToStateIPAddressField() (offset FieldOffset) {
 	if leg == legSource {
 		offset = stateOffIPSrc
 	} else if leg == legDestPreNAT {
@@ -470,7 +474,7 @@ func (leg matchLeg) offsetToStateIPAddressField() (offset int16) {
 	return
 }
 
-func (leg matchLeg) offsetToStatePortField() (portOffset int16) {
+func (leg matchLeg) offsetToStatePortField() (portOffset FieldOffset) {
 	if leg == legSource {
 		portOffset = stateOffSrcPort
 	} else if leg == legDestPreNAT {
