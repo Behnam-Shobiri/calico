@@ -1,6 +1,6 @@
 //go:build !windows
 
-// Copyright (c) 2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2021-2022 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,10 @@
 package intdataplane
 
 import (
+	"encoding/binary"
+	"hash/fnv"
 	"regexp"
+	"strconv"
 	"sync"
 
 	. "github.com/onsi/ginkgo"
@@ -28,8 +31,8 @@ import (
 	"github.com/projectcalico/calico/felix/logutils"
 
 	"github.com/projectcalico/calico/felix/bpf"
-	"github.com/projectcalico/calico/felix/bpf/asm"
 	"github.com/projectcalico/calico/felix/bpf/conntrack"
+	"github.com/projectcalico/calico/felix/bpf/counters"
 	"github.com/projectcalico/calico/felix/bpf/ifstate"
 	bpfipsets "github.com/projectcalico/calico/felix/bpf/ipsets"
 	"github.com/projectcalico/calico/felix/bpf/mock"
@@ -94,14 +97,14 @@ func (m *mockDataplane) ensureQdisc(iface string) error {
 	return nil
 }
 
-func (m *mockDataplane) updatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules) (asm.Insns, error) {
+func (m *mockDataplane) updatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules, polDir string, ap attachPoint) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	m.state[uint32(jumpMapFD)] = rules
-	return nil, nil
+	return nil
 }
 
-func (m *mockDataplane) removePolicyProgram(jumpMapFD bpf.MapFD) error {
+func (m *mockDataplane) removePolicyProgram(jumpMapFD bpf.MapFD, ap attachPoint) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	delete(m.state, uint32(jumpMapFD))
@@ -150,6 +153,12 @@ func (m *mockDataplane) delRoute(cidr ip.V4CIDR) {
 	delete(m.routes, cidr)
 }
 
+func (m *mockDataplane) ruleMatchID(dir, action, owner, name string, idx int) polprog.RuleMatchID {
+	h := fnv.New64a()
+	h.Write([]byte(action + owner + dir + strconv.Itoa(idx+1) + name))
+	return h.Sum64()
+}
+
 var _ = Describe("BPF Endpoint Manager", func() {
 
 	var (
@@ -158,6 +167,7 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		fibLookupEnabled     bool
 		endpointToHostAction string
 		dataIfacePattern     string
+		l3IfacePattern       string
 		workloadIfaceRegex   string
 		ipSetIDAllocator     *idalloc.IDAllocator
 		vxlanMTU             int
@@ -173,6 +183,7 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		fibLookupEnabled = true
 		endpointToHostAction = "DROP"
 		dataIfacePattern = "^((en|wl|ww|sl|ib)[opsx].*|(eth|wlan|wwan).*|tunl0$|wireguard.cali$)"
+		l3IfacePattern = "^(wireguard.cali$)"
 		workloadIfaceRegex = "cali"
 		ipSetIDAllocator = idalloc.New()
 		vxlanMTU = 0
@@ -185,6 +196,7 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		bpfMapContext.CtMap = conntrack.Map(bpfMapContext)
 		ifStateMap = mock.NewMockMap(ifstate.MapParams)
 		bpfMapContext.IfStateMap = ifStateMap
+		bpfMapContext.RuleCountersMap = mock.NewMockMap(counters.PolicyMapParameters)
 		rrConfigNormal = rules.Config{
 			IPIPEnabled:                 true,
 			IPIPTunnelAddress:           nil,
@@ -205,14 +217,14 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		filterTableV4 = newMockTable("filter")
 	})
 
-	JustBeforeEach(func() {
-		dp = newMockDataplane()
+	newBpfEpMgr := func() {
 		bpfEpMgr, _ = newBPFEndpointManager(
 			dp,
 			&Config{
 				Hostname:              "uthost",
 				BPFLogLevel:           "info",
 				BPFDataIfacePattern:   regexp.MustCompile(dataIfacePattern),
+				BPFL3IfacePattern:     regexp.MustCompile(l3IfacePattern),
 				VXLANMTU:              vxlanMTU,
 				VXLANPort:             rrConfigNormal.VXLANPort,
 				BPFNodePortDSREnabled: nodePortDSR,
@@ -220,9 +232,10 @@ var _ = Describe("BPF Endpoint Manager", func() {
 					EndpointToHostAction: endpointToHostAction,
 				},
 				BPFExtToServiceConnmark: 0,
-				FeatureDetectOverrides: map[string]string{
+				FeatureGates: map[string]string{
 					"BPFConnectTimeLoadBalancingWorkaround": "enabled",
 				},
+				BPFPolicyDebugEnabled: true,
 			},
 			bpfMapContext,
 			fibLookupEnabled,
@@ -234,11 +247,7 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			logutils.NewSummarizer("test"),
 		)
 		bpfEpMgr.Features = environment.NewFeatureDetector(nil).GetFeatures()
-	})
-
-	It("exists", func() {
-		Expect(bpfEpMgr).NotTo(BeNil())
-	})
+	}
 
 	genIfaceUpdate := func(name string, state ifacemonitor.State, index int) func() {
 		return func() {
@@ -323,6 +332,15 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		},
 	}
 
+	JustBeforeEach(func() {
+		dp = newMockDataplane()
+		newBpfEpMgr()
+	})
+
+	It("exists", func() {
+		Expect(bpfEpMgr).NotTo(BeNil())
+	})
+
 	It("does not have HEP in initial state", func() {
 		Expect(bpfEpMgr.hostIfaceToEpMap["eth0"]).NotTo(Equal(hostEp))
 	})
@@ -340,26 +358,26 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			var eth0I, eth0E, eth0X, caliI, caliE *polprog.Rules
 
 			// Check eth0 ingress.
-			Eventually(dp.setAndReturn(&eth0I, "eth0:tc-ingress")).ShouldNot(BeNil())
+			Eventually(dp.setAndReturn(&eth0I, "eth0:ingress")).ShouldNot(BeNil())
 			Expect(eth0I.ForHostInterface).To(BeTrue())
 			Expect(eth0I.HostNormalTiers).To(HaveLen(1))
 			Expect(eth0I.HostNormalTiers[0].Policies).To(HaveLen(1))
 			Expect(eth0I.SuppressNormalHostPolicy).To(BeFalse())
 
 			// Check eth0 egress.
-			Eventually(dp.setAndReturn(&eth0E, "eth0:tc-egress")).ShouldNot(BeNil())
+			Eventually(dp.setAndReturn(&eth0E, "eth0:egress")).ShouldNot(BeNil())
 			Expect(eth0E.ForHostInterface).To(BeTrue())
 			Expect(eth0E.HostNormalTiers).To(HaveLen(1))
 			Expect(eth0E.HostNormalTiers[0].Policies).To(HaveLen(1))
 			Expect(eth0E.SuppressNormalHostPolicy).To(BeFalse())
 
 			// Check workload ingress.
-			Eventually(dp.setAndReturn(&caliI, "cali12345:tc-egress")).ShouldNot(BeNil())
+			Eventually(dp.setAndReturn(&caliI, "cali12345:egress")).ShouldNot(BeNil())
 			Expect(caliI.ForHostInterface).To(BeFalse())
 			Expect(caliI.SuppressNormalHostPolicy).To(BeTrue())
 
 			// Check workload egress.
-			Eventually(dp.setAndReturn(&caliE, "cali12345:tc-ingress")).ShouldNot(BeNil())
+			Eventually(dp.setAndReturn(&caliE, "cali12345:ingress")).ShouldNot(BeNil())
 			Expect(caliE.ForHostInterface).To(BeFalse())
 			Expect(caliE.SuppressNormalHostPolicy).To(BeTrue())
 
@@ -376,12 +394,12 @@ var _ = Describe("BPF Endpoint Manager", func() {
 				var caliI, caliE *polprog.Rules
 
 				// Check workload ingress.
-				Eventually(dp.setAndReturn(&caliI, "cali12345:tc-egress")).ShouldNot(BeNil())
+				Eventually(dp.setAndReturn(&caliI, "cali12345:egress")).ShouldNot(BeNil())
 				Expect(caliI.ForHostInterface).To(BeFalse())
 				Expect(caliI.SuppressNormalHostPolicy).To(BeTrue())
 
 				// Check workload egress.
-				Eventually(dp.setAndReturn(&caliE, "cali12345:tc-ingress")).ShouldNot(BeNil())
+				Eventually(dp.setAndReturn(&caliE, "cali12345:ingress")).ShouldNot(BeNil())
 				Expect(caliE.ForHostInterface).To(BeFalse())
 				Expect(caliE.HostNormalTiers).To(HaveLen(1))
 				Expect(caliE.HostNormalTiers[0].Policies).To(HaveLen(1))
@@ -409,13 +427,13 @@ var _ = Describe("BPF Endpoint Manager", func() {
 				var eth0I, eth0E, eth0X *polprog.Rules
 
 				// Check ingress rules.
-				Eventually(dp.setAndReturn(&eth0I, "eth0:tc-ingress")).ShouldNot(BeNil())
+				Eventually(dp.setAndReturn(&eth0I, "eth0:ingress")).ShouldNot(BeNil())
 				Expect(eth0I.ForHostInterface).To(BeTrue())
 				Expect(eth0I.HostPreDnatTiers).To(HaveLen(1))
 				Expect(eth0I.HostPreDnatTiers[0].Policies).To(HaveLen(1))
 
 				// Check egress rules.
-				Eventually(dp.setAndReturn(&eth0E, "eth0:tc-egress")).ShouldNot(BeNil())
+				Eventually(dp.setAndReturn(&eth0E, "eth0:egress")).ShouldNot(BeNil())
 				Expect(eth0E.ForHostInterface).To(BeTrue())
 				Expect(eth0E.HostPreDnatTiers).To(BeNil())
 
@@ -517,6 +535,102 @@ var _ = Describe("BPF Endpoint Manager", func() {
 					}]).NotTo(HaveKey("eth0"))
 				})
 			})
+		})
+	})
+
+	Describe("polCounters", func() {
+		It("should update the maps with ruleIds", func() {
+			ingRule := &proto.Rule{Action: "Allow", RuleId: "INGRESSALLOW1234"}
+			egrRule := &proto.Rule{Action: "Allow", RuleId: "EGRESSALLOW12345"}
+			ingRuleMatchId := bpfEpMgr.dp.ruleMatchID("Ingress", "Allow", "Policy", "allowPol", 0)
+			egrRuleMatchId := bpfEpMgr.dp.ruleMatchID("Egress", "Allow", "Policy", "allowPol", 0)
+			k := make([]byte, 8)
+			v := make([]byte, 8)
+			rcMap := bpfEpMgr.bpfMapContext.RuleCountersMap
+
+			// create a new policy
+			bpfEpMgr.OnUpdate(&proto.ActivePolicyUpdate{
+				Id:     &proto.PolicyID{Tier: "default", Name: "allowPol"},
+				Policy: &proto.Policy{InboundRules: []*proto.Rule{ingRule}, OutboundRules: []*proto.Rule{egrRule}},
+			})
+			Expect(bpfEpMgr.polNameToMatchIDs).To(HaveLen(1))
+			val := bpfEpMgr.polNameToMatchIDs["allowPol"]
+			Expect(val.Contains(ingRuleMatchId)).To(BeTrue())
+			Expect(val.Contains(egrRuleMatchId)).To(BeTrue())
+			binary.LittleEndian.PutUint64(k, ingRuleMatchId)
+			binary.LittleEndian.PutUint64(v, uint64(10))
+			err := rcMap.Update(k[:], v[:])
+			Expect(err).NotTo(HaveOccurred())
+			binary.LittleEndian.PutUint64(k, egrRuleMatchId)
+			err = rcMap.Update(k[:], v[:])
+			Expect(err).NotTo(HaveOccurred())
+
+			// update the ingress rule of the policy
+			ingDenyRule := &proto.Rule{Action: "Deny", RuleId: "INGRESSDENY12345"}
+			ingDenyRuleMatchId := bpfEpMgr.dp.ruleMatchID("Ingress", "Deny", "Policy", "allowPol", 0)
+			bpfEpMgr.OnUpdate(&proto.ActivePolicyUpdate{
+				Id:     &proto.PolicyID{Tier: "default", Name: "allowPol"},
+				Policy: &proto.Policy{InboundRules: []*proto.Rule{ingDenyRule}, OutboundRules: []*proto.Rule{egrRule}},
+			})
+			Expect(bpfEpMgr.polNameToMatchIDs).To(HaveLen(1))
+			val = bpfEpMgr.polNameToMatchIDs["allowPol"]
+			Expect(val.Contains(ingDenyRuleMatchId)).To(BeTrue())
+			Expect(val.Contains(egrRuleMatchId)).To(BeTrue())
+			Expect(bpfEpMgr.dirtyRules.Contains(ingRuleMatchId)).To(BeTrue())
+			err = bpfEpMgr.CompleteDeferredWork()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(bpfEpMgr.dirtyRules.Contains(ingRuleMatchId)).NotTo(BeTrue())
+			binary.LittleEndian.PutUint64(k, ingRuleMatchId)
+			_, err = rcMap.Get(k)
+			Expect(err).To(HaveOccurred())
+			binary.LittleEndian.PutUint64(k, egrRuleMatchId)
+			v, err = rcMap.Get(k)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(binary.LittleEndian.Uint64(v)).To(Equal(uint64(10)))
+
+			// delete the policy
+			bpfEpMgr.OnUpdate(&proto.ActivePolicyRemove{Id: &proto.PolicyID{Tier: "default", Name: "allowPol"}})
+			Expect(bpfEpMgr.dirtyRules.Contains(egrRuleMatchId)).To(BeTrue())
+			Expect(bpfEpMgr.dirtyRules.Contains(ingDenyRuleMatchId)).To(BeTrue())
+			Expect(bpfEpMgr.polNameToMatchIDs).To(HaveLen(0))
+			err = bpfEpMgr.CompleteDeferredWork()
+			Expect(err).NotTo(HaveOccurred())
+			binary.LittleEndian.PutUint64(k, ingRuleMatchId)
+			_, err = rcMap.Get(k)
+			Expect(err).To(HaveOccurred())
+			binary.LittleEndian.PutUint64(k, egrRuleMatchId)
+			_, err = rcMap.Get(k)
+			Expect(err).To(HaveOccurred())
+			binary.LittleEndian.PutUint64(k, ingDenyRuleMatchId)
+			_, err = rcMap.Get(k)
+			Expect(err).To(HaveOccurred())
+
+		})
+
+		It("should cleanup the bpf map after restart", func() {
+			ingRuleMatchId := bpfEpMgr.dp.ruleMatchID("Ingress", "Allow", "Policy", "allowPol", 0)
+			egrRuleMatchId := bpfEpMgr.dp.ruleMatchID("Egress", "Allow", "Policy", "allowPol", 0)
+			k := make([]byte, 8)
+			v := make([]byte, 8)
+			rcMap := bpfEpMgr.bpfMapContext.RuleCountersMap
+
+			binary.LittleEndian.PutUint64(k, ingRuleMatchId)
+			binary.LittleEndian.PutUint64(v, uint64(10))
+			err := rcMap.Update(k[:], v[:])
+			Expect(err).NotTo(HaveOccurred())
+
+			binary.LittleEndian.PutUint64(k, egrRuleMatchId)
+			binary.LittleEndian.PutUint64(v, uint64(10))
+			err = rcMap.Update(k[:], v[:])
+			Expect(err).NotTo(HaveOccurred())
+
+			newBpfEpMgr()
+			binary.LittleEndian.PutUint64(k, ingRuleMatchId)
+			_, err = rcMap.Get(k[:])
+			Expect(err).To(HaveOccurred())
+			binary.LittleEndian.PutUint64(k, egrRuleMatchId)
+			_, err = rcMap.Get(k[:])
+			Expect(err).To(HaveOccurred())
 		})
 	})
 

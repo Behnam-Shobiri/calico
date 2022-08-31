@@ -1976,7 +1976,14 @@ func schema_pkg_apis_projectcalico_v3_FelixConfigurationSpec(ref common.Referenc
 					},
 					"featureDetectOverride": {
 						SchemaProps: spec.SchemaProps{
-							Description: "FeatureDetectOverride is used to override the feature detection. Values are specified in a comma separated list with no spaces, example; \"SNATFullyRandom=true,MASQFullyRandom=false,RestoreSupportsLock=\". \"true\" or \"false\" will force the feature, empty or omitted values are auto-detected.",
+							Description: "FeatureDetectOverride is used to override feature detection based on auto-detected platform capabilities.  Values are specified in a comma separated list with no spaces, example; \"SNATFullyRandom=true,MASQFullyRandom=false,RestoreSupportsLock=\".  \"true\" or \"false\" will force the feature, empty or omitted values are auto-detected.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"featureGates": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FeatureGates is used to enable or disable tech-preview Calico features. Values are specified in a comma separated list with no spaces, example; \"BPFConnectTimeLoadBalancingWorkaround=enabled,XyZ=false\". This is used to enable features that are not fully production ready.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -2473,6 +2480,13 @@ func schema_pkg_apis_projectcalico_v3_FelixConfigurationSpec(ref common.Referenc
 							Format:      "",
 						},
 					},
+					"bpfL3IfacePattern": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BPFL3IfacePattern is a regular expression that allows to list tunnel devices like wireguard or vxlan (i.e., L3 devices) in addition to BPFDataIfacePattern. That is, tunnel interfaces not created by Calico, that Calico workload traffic flows over as well as any interfaces that handle incoming traffic to nodeports and services from outside the cluster.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"bpfConnectTimeLoadBalancingEnabled": {
 						SchemaProps: spec.SchemaProps{
 							Description: "BPFConnectTimeLoadBalancingEnabled when in BPF mode, controls whether Felix installs the connection-time load balancer.  The connect-time load balancer is required for the host to be able to reach Kubernetes services and it improves the performance of pod-to-service connections.  The only reason to disable it is for debugging purposes.  [Default: true]",
@@ -2566,6 +2580,13 @@ func schema_pkg_apis_projectcalico_v3_FelixConfigurationSpec(ref common.Referenc
 							Description: "BPFMapSizeIfState sets the size for ifstate map.  The ifstate map must be large enough to hold an entry for each device (host + workloads) on a host.",
 							Type:        []string{"integer"},
 							Format:      "int32",
+						},
+					},
+					"bpfHostConntrackBypass": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BPFHostConntrackBypass Controls whether to bypass Linux conntrack in BPF mode for workloads and services. [Default: true - bypass Linux conntrack]",
+							Type:        []string{"boolean"},
+							Format:      "",
 						},
 					},
 					"bpfEnforceRPF": {

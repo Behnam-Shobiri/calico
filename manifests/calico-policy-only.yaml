@@ -893,6 +893,11 @@ spec:
                   node appears to use the IP of the ingress node; this requires a
                   permissive L2 network.  [Default: Tunnel]'
                 type: string
+              bpfHostConntrackBypass:
+                description: 'BPFHostConntrackBypass Controls whether to bypass Linux
+                  conntrack in BPF mode for workloads and services. [Default: true
+                  - bypass Linux conntrack]'
+                type: boolean
               bpfKubeProxyEndpointSlicesEnabled:
                 description: BPFKubeProxyEndpointSlicesEnabled in BPF mode, controls
                   whether Felix's embedded kube-proxy accepts EndpointSlices or not.
@@ -908,6 +913,14 @@ spec:
                   minimum time between updates to the dataplane for Felix''s embedded
                   kube-proxy.  Lower values give reduced set-up latency.  Higher values
                   reduce Felix CPU usage by batching up more work.  [Default: 1s]'
+                type: string
+              bpfL3IfacePattern:
+                description: BPFL3IfacePattern is a regular expression that allows
+                  to list tunnel devices like wireguard or vxlan (i.e., L3 devices)
+                  in addition to BPFDataIfacePattern. That is, tunnel interfaces not
+                  created by Calico, that Calico workload traffic flows over as well
+                  as any interfaces that handle incoming traffic to nodeports and
+                  services from outside the cluster.
                 type: string
               bpfLogLevel:
                 description: 'BPFLogLevel controls the log level of the BPF programs
@@ -1092,11 +1105,16 @@ spec:
                   type: object
                 type: array
               featureDetectOverride:
-                description: FeatureDetectOverride is used to override the feature
-                  detection. Values are specified in a comma separated list with no
-                  spaces, example; "SNATFullyRandom=true,MASQFullyRandom=false,RestoreSupportsLock=".
-                  "true" or "false" will force the feature, empty or omitted values
-                  are auto-detected.
+                description: FeatureDetectOverride is used to override feature detection
+                  based on auto-detected platform capabilities.  Values are specified
+                  in a comma separated list with no spaces, example; "SNATFullyRandom=true,MASQFullyRandom=false,RestoreSupportsLock=".  "true"
+                  or "false" will force the feature, empty or omitted values are auto-detected.
+                type: string
+              featureGates:
+                description: FeatureGates is used to enable or disable tech-preview
+                  Calico features. Values are specified in a comma separated list
+                  with no spaces, example; "BPFConnectTimeLoadBalancingWorkaround=enabled,XyZ=false".
+                  This is used to enable features that are not fully production ready.
                 type: string
               floatingIPs:
                 description: FloatingIPs configures whether or not Felix will program

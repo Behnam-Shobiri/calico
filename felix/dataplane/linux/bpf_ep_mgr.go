@@ -33,6 +33,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -53,6 +54,7 @@ import (
 	"github.com/projectcalico/calico/felix/bpf"
 	"github.com/projectcalico/calico/felix/bpf/asm"
 	"github.com/projectcalico/calico/felix/bpf/bpfmap"
+	"github.com/projectcalico/calico/felix/bpf/counters"
 	"github.com/projectcalico/calico/felix/bpf/ifstate"
 	"github.com/projectcalico/calico/felix/bpf/polprog"
 	"github.com/projectcalico/calico/felix/bpf/tc"
@@ -98,6 +100,7 @@ func init() {
 type attachPoint interface {
 	IfaceName() string
 	JumpMapFDMapKey() string
+	HookName() bpf.Hook
 	IsAttached() (bool, error)
 	AttachProgram() (int, error)
 	DetachProgram() error
@@ -110,12 +113,13 @@ type bpfDataplane interface {
 	ensureNoProgram(ap attachPoint) error
 	ensureQdisc(iface string) error
 	ensureBPFDevices() error
-	updatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules) (asm.Insns, error)
-	removePolicyProgram(jumpMapFD bpf.MapFD) error
+	updatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules, polDir string, ap attachPoint) error
+	removePolicyProgram(jumpMapFD bpf.MapFD, ap attachPoint) error
 	setAcceptLocal(iface string, val bool) error
 	setRPFilter(iface string, val int) error
 	setRoute(ip.V4CIDR)
 	delRoute(ip.V4CIDR)
+	ruleMatchID(dir, action, owner, name string, idx int) polprog.RuleMatchID
 }
 
 type bpfInterface struct {
@@ -164,6 +168,7 @@ type bpfEndpointManager struct {
 	hostIP                  net.IP
 	fibLookupEnabled        bool
 	dataIfaceRegex          *regexp.Regexp
+	l3IfaceRegex            *regexp.Regexp
 	workloadIfaceRegex      *regexp.Regexp
 	ipSetIDAlloc            *idalloc.IDAllocator
 	epToHostAction          string
@@ -220,6 +225,10 @@ type bpfEndpointManager struct {
 	routeTable    routetable.RouteTableInterface
 	services      map[serviceKey][]ip.V4CIDR
 	dirtyServices set.Set[serviceKey]
+
+	// Maps for policy rule counters
+	polNameToMatchIDs map[string]set.Set[polprog.RuleMatchID]
+	dirtyRules        set.Set[polprog.RuleMatchID]
 }
 
 type serviceKey struct {
@@ -261,6 +270,7 @@ func newBPFEndpointManager(
 		hostname:                config.Hostname,
 		fibLookupEnabled:        fibLookupEnabled,
 		dataIfaceRegex:          config.BPFDataIfacePattern,
+		l3IfaceRegex:            config.BPFL3IfacePattern,
 		workloadIfaceRegex:      workloadIfaceRegex,
 		ipSetIDAlloc:            ipSetIDAlloc,
 		epToHostAction:          config.RulesConfig.EndpointToHostAction,
@@ -291,6 +301,8 @@ func newBPFEndpointManager(
 		ipv6Enabled:           config.BPFIpv6Enabled,
 		rpfStrictModeEnabled:  config.BPFEnforceRPF,
 		bpfPolicyDebugEnabled: config.BPFPolicyDebugEnabled,
+		polNameToMatchIDs:     map[string]set.Set[polprog.RuleMatchID]{},
+		dirtyRules:            set.New[polprog.RuleMatchID](),
 	}
 
 	// Calculate allowed XDP attachment modes.  Note, in BPF mode untracked ingress policy is
@@ -314,8 +326,8 @@ func newBPFEndpointManager(
 		m.dp = m
 	}
 
-	if config.FeatureDetectOverrides != nil {
-		m.ctlbWorkaroundEnabled = config.FeatureDetectOverrides["BPFConnectTimeLoadBalancingWorkaround"] == "enabled"
+	if config.FeatureGates != nil {
+		m.ctlbWorkaroundEnabled = config.FeatureGates["BPFConnectTimeLoadBalancingWorkaround"] == "enabled"
 	}
 
 	if m.ctlbWorkaroundEnabled {
@@ -346,6 +358,10 @@ func newBPFEndpointManager(
 		} else {
 			log.Infof("Created %s:%s veth pair.", bpfInDev, bpfOutDev)
 		}
+	}
+
+	if m.bpfPolicyDebugEnabled {
+		counters.DeleteAllPolicyCounters(m.bpfMapContext)
 	}
 
 	return m, nil
@@ -511,8 +527,8 @@ func (m *bpfEndpointManager) onInterfaceUpdate(update *ifaceUpdate) {
 		}
 	}
 
-	if !m.isDataIface(update.Name) && !m.isWorkloadIface(update.Name) {
-		log.WithField("update", update).Debug("Ignoring interface that's neither data nor workload.")
+	if !m.isDataIface(update.Name) && !m.isWorkloadIface(update.Name) && !m.isL3Iface(update.Name) {
+		log.WithField("update", update).Debug("Ignoring interface that's neither data nor workload nor L3.")
 		return
 	}
 
@@ -587,8 +603,7 @@ func (m *bpfEndpointManager) onWorkloadEnpdointRemove(msg *proto.WorkloadEndpoin
 		return false
 	})
 	// Remove policy debug info if any
-	m.removePolicyDebugInfo(oldWEP.Name, bpf.HookIngress)
-	m.removePolicyDebugInfo(oldWEP.Name, bpf.HookEgress)
+	m.removeIfaceAllPolicyDebugInfo(oldWEP.Name)
 }
 
 // onPolicyUpdate stores the policy in the cache and marks any endpoints using it dirty.
@@ -597,6 +612,9 @@ func (m *bpfEndpointManager) onPolicyUpdate(msg *proto.ActivePolicyUpdate) {
 	log.WithField("id", polID).Debug("Policy update")
 	m.policies[polID] = msg.Policy
 	m.markEndpointsDirty(m.policiesToWorkloads[polID], "policy")
+	if m.bpfPolicyDebugEnabled {
+		m.updatePolicyCache(polID.Name, "Policy", m.policies[polID].InboundRules, m.policies[polID].OutboundRules)
+	}
 }
 
 // onPolicyRemove removes the policy from the cache and marks any endpoints using it dirty.
@@ -607,6 +625,10 @@ func (m *bpfEndpointManager) onPolicyRemove(msg *proto.ActivePolicyRemove) {
 	m.markEndpointsDirty(m.policiesToWorkloads[polID], "policy")
 	delete(m.policies, polID)
 	delete(m.policiesToWorkloads, polID)
+	if m.bpfPolicyDebugEnabled {
+		m.dirtyRules.AddSet(m.polNameToMatchIDs[polID.Name])
+		delete(m.polNameToMatchIDs, polID.Name)
+	}
 }
 
 // onProfileUpdate stores the profile in the cache and marks any endpoints that use it as dirty.
@@ -615,6 +637,9 @@ func (m *bpfEndpointManager) onProfileUpdate(msg *proto.ActiveProfileUpdate) {
 	log.WithField("id", profID).Debug("Profile update")
 	m.profiles[profID] = msg.Profile
 	m.markEndpointsDirty(m.profilesToWorkloads[profID], "profile")
+	if m.bpfPolicyDebugEnabled {
+		m.updatePolicyCache(profID.Name, "Profile", m.profiles[profID].InboundRules, m.profiles[profID].OutboundRules)
+	}
 }
 
 // onProfileRemove removes the profile from the cache and marks any endpoints that were using it as dirty.
@@ -625,6 +650,24 @@ func (m *bpfEndpointManager) onProfileRemove(msg *proto.ActiveProfileRemove) {
 	m.markEndpointsDirty(m.profilesToWorkloads[profID], "profile")
 	delete(m.profiles, profID)
 	delete(m.profilesToWorkloads, profID)
+	if m.bpfPolicyDebugEnabled {
+		m.dirtyRules.AddSet(m.polNameToMatchIDs[profID.Name])
+		delete(m.polNameToMatchIDs, profID.Name)
+	}
+}
+
+func (m *bpfEndpointManager) removeDirtyPolicies() {
+	b := make([]byte, 8)
+	m.dirtyRules.Iter(func(item polprog.RuleMatchID) error {
+		binary.LittleEndian.PutUint64(b, item)
+		log.WithField("ruleId", item).Debug("deleting entry")
+		err := m.bpfMapContext.RuleCountersMap.Delete(b)
+		if err != nil && !bpf.IsNotExists(err) {
+			log.WithField("ruleId", item).Info("error deleting entry")
+		}
+
+		return set.RemoveItem
+	})
 }
 
 func (m *bpfEndpointManager) markEndpointsDirty(ids set.Set[any], kind string) {
@@ -669,6 +712,9 @@ func (m *bpfEndpointManager) CompleteDeferredWork() error {
 
 	m.applyProgramsToDirtyDataInterfaces()
 	m.updateWEPsInDataplane()
+	if m.bpfPolicyDebugEnabled {
+		m.removeDirtyPolicies()
+	}
 
 	bpfEndpointsGauge.Set(float64(len(m.nameToIface)))
 	bpfDirtyEndpointsGauge.Set(float64(m.dirtyIfaceNames.Len()))
@@ -707,9 +753,9 @@ func (m *bpfEndpointManager) applyProgramsToDirtyDataInterfaces() {
 	errs := map[string]error{}
 	var wg sync.WaitGroup
 	m.dirtyIfaceNames.Iter(func(iface string) error {
-		if !m.isDataIface(iface) {
+		if !m.isDataIface(iface) && !m.isL3Iface(iface) {
 			log.WithField("iface", iface).Debug(
-				"Ignoring interface that doesn't match the host data interface regex")
+				"Ignoring interface that doesn't match the host data/l3 interface regex")
 			return nil
 		}
 		if !m.ifaceIsUp(iface) {
@@ -776,9 +822,9 @@ func (m *bpfEndpointManager) applyProgramsToDirtyDataInterfaces() {
 	defer m.ifacesLock.Unlock()
 
 	m.dirtyIfaceNames.Iter(func(iface string) error {
-		if !m.isDataIface(iface) {
+		if !m.isDataIface(iface) && !m.isL3Iface(iface) {
 			log.WithField("iface", iface).Debug(
-				"Ignoring interface that doesn't match the host data interface regex")
+				"Ignoring interface that doesn't match the host data/l3 interface regex")
 			return nil
 		}
 		err := errs[iface]
@@ -1055,12 +1101,7 @@ func (m *bpfEndpointManager) attachWorkloadProgram(ifaceName string, endpoint *p
 		rules.SuppressNormalHostPolicy = true
 	}
 
-	insns, err := m.dp.updatePolicyProgram(jumpMapFD, rules)
-	perr := m.writePolicyDebugInfo(insns, ap.Iface, ap.Hook, err)
-	if perr != nil {
-		log.WithError(perr).Warn("error writing policy debug information")
-	}
-	return err
+	return m.dp.updatePolicyProgram(jumpMapFD, rules, polDirection.RuleDir(), &ap)
 }
 
 func (m *bpfEndpointManager) addHostPolicy(rules *polprog.Rules, hostEndpoint *proto.HostEndpoint, polDirection PolDirection) {
@@ -1118,19 +1159,13 @@ func (m *bpfEndpointManager) attachDataIfaceProgram(ifaceName string, ep *proto.
 			ForHostInterface: true,
 		}
 		m.addHostPolicy(&rules, ep, polDirection)
-		insns, err := m.dp.updatePolicyProgram(jumpMapFD, rules)
-		perr := m.writePolicyDebugInfo(insns, ap.Iface, ap.Hook, err)
-		if perr != nil {
-			log.WithError(perr).Warn("error writing policy debug information")
-		}
-		return err
+		return m.dp.updatePolicyProgram(jumpMapFD, rules, polDirection.RuleDir(), ap)
 	}
 
-	err = m.dp.removePolicyProgram(jumpMapFD)
+	err = m.dp.removePolicyProgram(jumpMapFD, ap)
 	if err != nil {
 		return err
 	}
-	m.removePolicyDebugInfo(ap.Iface, ap.Hook)
 	return nil
 }
 
@@ -1154,8 +1189,7 @@ func (m *bpfEndpointManager) attachXDPProgram(ifaceName string, ep *proto.HostEn
 			ForXDP:           true,
 		}
 		ap.Log().Debugf("Rules: %v", rules)
-		_, err = m.dp.updatePolicyProgram(jumpMapFD, rules)
-		return err
+		return m.dp.updatePolicyProgram(jumpMapFD, rules, string(bpf.HookXDP), ap)
 	} else {
 		return m.dp.ensureNoProgram(&ap)
 	}
@@ -1197,7 +1231,7 @@ func (m *bpfEndpointManager) calculateTCAttachPoint(policyDirection PolDirection
 		} else {
 			endpointType = tc.EpTypeTunnel
 		}
-	} else if ifaceName == "wireguard.cali" {
+	} else if ifaceName == "wireguard.cali" || m.isL3Iface(ifaceName) {
 		endpointType = tc.EpTypeL3Device
 	} else if ifaceName == bpfInDev || ifaceName == bpfOutDev {
 		endpointType = tc.EpTypeNAT
@@ -1290,7 +1324,7 @@ func (m *bpfEndpointManager) extractTiers(tier *proto.TierInfo, direction PolDir
 			for ri, r := range prules {
 				policy.Rules[ri] = polprog.Rule{
 					Rule:    r,
-					MatchID: ruleMatchID(dir, r.Action, "Policy", ri, polName),
+					MatchID: m.dp.ruleMatchID(dir, r.Action, "Policy", polName, ri),
 				}
 			}
 
@@ -1329,7 +1363,7 @@ func (m *bpfEndpointManager) extractProfiles(profileNames []string, direction Po
 			for ri, r := range prules {
 				profile.Rules[ri] = polprog.Rule{
 					Rule:    r,
-					MatchID: ruleMatchID(dir, r.Action, "Profile", ri, profName),
+					MatchID: m.dp.ruleMatchID(dir, r.Action, "Profile", profName, ri),
 				}
 			}
 
@@ -1357,6 +1391,13 @@ func (m *bpfEndpointManager) isWorkloadIface(iface string) bool {
 
 func (m *bpfEndpointManager) isDataIface(iface string) bool {
 	return m.dataIfaceRegex.MatchString(iface) || iface == bpfOutDev
+}
+
+func (m *bpfEndpointManager) isL3Iface(iface string) bool {
+	if m.l3IfaceRegex == nil {
+		return false
+	}
+	return m.l3IfaceRegex.MatchString(iface)
 }
 
 func (m *bpfEndpointManager) addWEPToIndexes(wlID proto.WorkloadEndpointID, wl *proto.WorkloadEndpoint) {
@@ -1456,7 +1497,7 @@ func (m *bpfEndpointManager) OnHEPUpdate(hostIfaceToEpMap map[string]proto.HostE
 	if wildcardExists {
 		log.Info("Host-* endpoint is configured")
 		for ifaceName := range m.nameToIface {
-			if _, specificExists := hostIfaceToEpMap[ifaceName]; m.isDataIface(ifaceName) && !specificExists {
+			if _, specificExists := hostIfaceToEpMap[ifaceName]; (m.isDataIface(ifaceName) || m.isL3Iface(ifaceName)) && !specificExists {
 				log.Infof("Use host-* endpoint policy for %v", ifaceName)
 				hostIfaceToEpMap[ifaceName] = wildcardHostEndpoint
 			}
@@ -1507,8 +1548,8 @@ func (m *bpfEndpointManager) OnHEPUpdate(hostIfaceToEpMap map[string]proto.HostE
 
 	// Now anything remaining in hostIfaceToEpMap must be a new host endpoint.
 	for ifaceName, newEp := range hostIfaceToEpMap {
-		if !m.isDataIface(ifaceName) {
-			log.Warningf("Host endpoint configured for ifaceName=%v, but that doesn't match BPFDataIfacePattern; ignoring", ifaceName)
+		if !m.isDataIface(ifaceName) && !m.isL3Iface(ifaceName) {
+			log.Warningf("Host endpoint configured for ifaceName=%v, but that doesn't match BPFDataIfacePattern/BPFL3IfacePattern; ignoring", ifaceName)
 			continue
 		}
 		log.Infof("Host endpoint added for ifaceName=%v", ifaceName)
@@ -1761,31 +1802,36 @@ func (m *bpfEndpointManager) setJumpMapFD(ap attachPoint, fd bpf.MapFD) {
 	})
 }
 
-func (m *bpfEndpointManager) removePolicyDebugInfo(ifaceName string, hook bpf.Hook) {
+func (m *bpfEndpointManager) removeIfaceAllPolicyDebugInfo(ifaceName string) {
+	ipVersions := []proto.IPVersion{proto.IPVersion_IPV4}
+	if m.ipv6Enabled {
+		ipVersions = append(ipVersions, proto.IPVersion_IPV6)
+	}
+
+	for _, ipFamily := range ipVersions {
+		for _, hook := range bpf.Hooks {
+			m.removePolicyDebugInfo(ifaceName, ipFamily, hook)
+		}
+	}
+}
+
+func (m *bpfEndpointManager) removePolicyDebugInfo(ifaceName string, ipFamily proto.IPVersion, hook bpf.Hook) {
 	if !m.bpfPolicyDebugEnabled {
 		return
 	}
-	filename := bpf.PolicyDebugJSONFileName(ifaceName, string(hook))
+	filename := bpf.PolicyDebugJSONFileName(ifaceName, string(hook), ipFamily)
 	err := os.Remove(filename)
 	if err != nil {
 		log.WithError(err).Debugf("Failed to remove the policy debug file %v. Ignoring", filename)
 	}
 }
 
-func (m *bpfEndpointManager) writePolicyDebugInfo(insns asm.Insns, ifaceName string, tcHook bpf.Hook, polErr error) error {
+func (m *bpfEndpointManager) writePolicyDebugInfo(insns asm.Insns, ifaceName string, ipFamily proto.IPVersion, polDir string, hook bpf.Hook, polErr error) error {
 	if !m.bpfPolicyDebugEnabled {
 		return nil
 	}
 	if err := os.MkdirAll(bpf.RuntimePolDir, 0600); err != nil {
 		return err
-	}
-
-	// policy programs are attached to interfaces from the host. The direction
-	// is in reference with the host. Workload's ingress is host's egress and
-	// vice versa.
-	polDir := "ingress"
-	if tcHook == bpf.HookIngress {
-		polDir = "egress"
 	}
 
 	errStr := ""
@@ -1795,12 +1841,12 @@ func (m *bpfEndpointManager) writePolicyDebugInfo(insns asm.Insns, ifaceName str
 
 	var policyDebugInfo = bpf.PolicyDebugInfo{
 		IfaceName:  ifaceName,
-		Hook:       "tc " + string(tcHook),
+		Hook:       "tc " + string(hook),
 		PolicyInfo: insns,
 		Error:      errStr,
 	}
 
-	filename := bpf.PolicyDebugJSONFileName(ifaceName, polDir)
+	filename := bpf.PolicyDebugJSONFileName(ifaceName, strings.ToLower(polDir), ipFamily)
 	buffer := &bytes.Buffer{}
 	encoder := json.NewEncoder(buffer)
 	err := encoder.Encode(policyDebugInfo)
@@ -1814,11 +1860,41 @@ func (m *bpfEndpointManager) writePolicyDebugInfo(insns asm.Insns, ifaceName str
 	return nil
 }
 
-func (m *bpfEndpointManager) updatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules) (asm.Insns, error) {
+func (m *bpfEndpointManager) updatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules, polDir string, ap attachPoint) error {
+	ipVersions := []proto.IPVersion{proto.IPVersion_IPV4}
+	if m.ipv6Enabled {
+		ipVersions = append(ipVersions, proto.IPVersion_IPV6)
+	}
+
+	for _, ipFamily := range ipVersions {
+		insns, err := m.doUpdatePolicyProgram(jumpMapFD, rules, ipFamily)
+		perr := m.writePolicyDebugInfo(insns, ap.IfaceName(), ipFamily, polDir, ap.HookName(), err)
+		if perr != nil {
+			log.WithError(perr).Warn("error writing policy debug information")
+		}
+		if err != nil {
+			return fmt.Errorf("failed to update policy program v%d: %w", ipFamily, err)
+		}
+	}
+	return nil
+}
+
+func indexOfPolicyProgram(ipFamily proto.IPVersion) uint32 {
+	if ipFamily == proto.IPVersion_IPV6 {
+		return bpf.ProgIndexV6Policy
+	} else {
+		return bpf.ProgIndexPolicy
+	}
+}
+
+func (m *bpfEndpointManager) doUpdatePolicyProgram(jumpMapFD bpf.MapFD, rules polprog.Rules, ipFamily proto.IPVersion) (asm.Insns, error) {
 	pg := polprog.NewBuilder(m.ipSetIDAlloc, m.bpfMapContext.IpsetsMap.MapFD(), m.bpfMapContext.StateMap.MapFD(), jumpMapFD, m.bpfPolicyDebugEnabled)
+	if ipFamily == proto.IPVersion_IPV6 {
+		pg.EnableIPv6Mode()
+	}
 	insns, err := pg.Instructions(rules)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate policy bytecode: %w", err)
+		return nil, fmt.Errorf("failed to generate policy bytecode v%v: %w", ipFamily, err)
 	}
 	progType := unix.BPF_PROG_TYPE_SCHED_CLS
 	if rules.ForXDP {
@@ -1826,7 +1902,7 @@ func (m *bpfEndpointManager) updatePolicyProgram(jumpMapFD bpf.MapFD, rules polp
 	}
 	progFD, err := bpf.LoadBPFProgramFromInsns(insns, "Apache-2.0", uint32(progType))
 	if err != nil {
-		return nil, fmt.Errorf("failed to load BPF policy program: %w", err)
+		return nil, fmt.Errorf("failed to load BPF policy program v%v: %w", ipFamily, err)
 	}
 	defer func() {
 		// Once we've put the program in the map, we don't need its FD any more.
@@ -1835,18 +1911,38 @@ func (m *bpfEndpointManager) updatePolicyProgram(jumpMapFD bpf.MapFD, rules polp
 			log.WithError(err).Panic("Failed to close program FD.")
 		}
 	}()
+
 	k := make([]byte, 4)
+	binary.LittleEndian.PutUint32(k, indexOfPolicyProgram(ipFamily))
 	v := make([]byte, 4)
 	binary.LittleEndian.PutUint32(v, uint32(progFD))
 	err = bpf.UpdateMapEntry(jumpMapFD, k, v)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update %v=%v in jump map %v: %w", k, v, jumpMapFD, err)
 	}
+
 	return insns, nil
 }
 
-func (m *bpfEndpointManager) removePolicyProgram(jumpMapFD bpf.MapFD) error {
+func (m *bpfEndpointManager) removePolicyProgram(jumpMapFD bpf.MapFD, ap attachPoint) error {
+	ipVersions := []proto.IPVersion{proto.IPVersion_IPV4}
+	if m.ipv6Enabled {
+		ipVersions = append(ipVersions, proto.IPVersion_IPV6)
+	}
+
+	for _, ipFamily := range ipVersions {
+		err := m.doRemovePolicyProgram(jumpMapFD, ipFamily)
+		if err != nil {
+			return fmt.Errorf("failed to remove policy program v%d: %w", ipFamily, err)
+		}
+		m.removePolicyDebugInfo(ap.IfaceName(), ipFamily, ap.HookName())
+	}
+	return nil
+}
+
+func (m *bpfEndpointManager) doRemovePolicyProgram(jumpMapFD bpf.MapFD, ipFamily proto.IPVersion) error {
 	k := make([]byte, 4)
+	binary.LittleEndian.PutUint32(k, indexOfPolicyProgram(ipFamily))
 	err := bpf.DeleteMapEntryIfExists(jumpMapFD, k, 4)
 	if err != nil {
 		return fmt.Errorf("failed to update jump map: %w", err)
@@ -2031,13 +2127,36 @@ func (m *bpfEndpointManager) GetRouteTableSyncers() []routetable.RouteTableSynce
 	return tables
 }
 
-func ruleMatchID(
-	dir string,
-	action string,
-	owner string,
-	idx int,
-	name string) polprog.RuleMatchID {
+// updatePolicyCache modifies entries in the cache, adding new entries and marking old entries dirty.
+func (m *bpfEndpointManager) updatePolicyCache(name string, owner string, inboundRules, outboundRules []*proto.Rule) {
+	ruleIds := set.New[polprog.RuleMatchID]()
+	if val, ok := m.polNameToMatchIDs[name]; ok {
+		// If the policy name exists, it means the policy is updated. There are cases where both inbound,
+		// outbound rules are updated or any one.
+		// Mark all the entries as dirty.
+		m.dirtyRules.AddSet(val)
+	}
+	// Now iterate through all the rules and if the ruleIds are already in the cache, it means the rule has not
+	// changed as part of the update. Remove the dirty flag and add this entry back as non-dirty.
+	for idx, rule := range inboundRules {
+		ruleIds.Add(m.addRuleInfo(rule, idx, owner, PolDirnIngress, name))
+	}
+	for idx, rule := range outboundRules {
+		ruleIds.Add(m.addRuleInfo(rule, idx, owner, PolDirnEgress, name))
+	}
+	m.polNameToMatchIDs[name] = ruleIds
+}
 
+func (m *bpfEndpointManager) addRuleInfo(rule *proto.Rule, idx int,
+	owner string, direction PolDirection, polName string) polprog.RuleMatchID {
+
+	matchID := m.dp.ruleMatchID(direction.RuleDir(), rule.Action, owner, polName, idx)
+	m.dirtyRules.Discard(matchID)
+
+	return matchID
+}
+
+func (m *bpfEndpointManager) ruleMatchID(dir, action, owner, name string, idx int) polprog.RuleMatchID {
 	h := fnv.New64a()
 	h.Write([]byte(action + owner + dir + strconv.Itoa(idx) + name))
 	return h.Sum64()
