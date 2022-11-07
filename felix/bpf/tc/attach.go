@@ -79,6 +79,10 @@ func (ap AttachPoint) Log() *log.Entry {
 	})
 }
 
+func (ap AttachPoint) loadLogging() bool {
+	return strings.ToLower(ap.LogLevel) != "off"
+}
+
 func (ap AttachPoint) AlreadyAttached(object string) (int, bool) {
 	logCxt := log.WithField("attachPoint", ap)
 	progID, err := ap.ProgramID()
@@ -119,12 +123,18 @@ func (ap AttachPoint) AttachProgram() (int, error) {
 
 	filename := ap.FileName()
 	preCompiledBinary := path.Join(bpf.ObjectDir, filename)
-	tempBinary := path.Join(tempDir, filename)
+	binaryToLoad := preCompiledBinary
 
-	err = ap.patchLogPrefix(logCxt, preCompiledBinary, tempBinary)
-	if err != nil {
-		logCxt.WithError(err).Error("Failed to patch binary")
-		return -1, err
+	if ap.loadLogging() {
+		tempBinary := path.Join(tempDir, filename)
+
+		err = ap.patchLogPrefix(logCxt, preCompiledBinary, tempBinary)
+		if err != nil {
+			logCxt.WithError(err).Error("Failed to patch binary")
+			return -1, err
+		}
+
+		binaryToLoad = tempBinary
 	}
 
 	// Using the RLock allows multiple attach calls to proceed in parallel unless
@@ -138,7 +148,7 @@ func (ap AttachPoint) AttachProgram() (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	obj, err := libbpf.OpenObject(tempBinary)
+	obj, err := libbpf.OpenObject(binaryToLoad)
 	if err != nil {
 		return -1, err
 	}
@@ -178,12 +188,7 @@ func (ap AttachPoint) AttachProgram() (int, error) {
 		return -1, fmt.Errorf("error loading program: %w", err)
 	}
 
-	isHost := false
-	if ap.Type == "host" || ap.Type == "nat" || ap.Type == "lo" {
-		isHost = true
-	}
-
-	err = updateJumpMap(obj, isHost, ap.IPv6Enabled)
+	err = ap.updateJumpMap(obj)
 	if err != nil {
 		logCxt.Warn("Failed to update jump map")
 		return -1, fmt.Errorf("error updating jump map %v", err)
@@ -644,9 +649,27 @@ func (ap *AttachPoint) setMapSize(m *libbpf.Map) error {
 	return nil
 }
 
-func updateJumpMap(obj *libbpf.Obj, isHost bool, ipv6Enabled bool) error {
+func (ap AttachPoint) hasPolicyProg() bool {
+	switch ap.Type {
+	case EpTypeHost, EpTypeNAT, EpTypeLO:
+		return false
+	}
+
+	return true
+}
+
+func (ap AttachPoint) hasHostConflictProg() bool {
+	switch ap.Type {
+	case EpTypeWorkload:
+		return false
+	}
+
+	return ap.ToOrFrom == ToEp
+}
+
+func (ap AttachPoint) updateJumpMap(obj *libbpf.Obj) error {
 	ipVersions := []string{"IPv4"}
-	if ipv6Enabled {
+	if ap.IPv6Enabled {
 		ipVersions = append(ipVersions, "IPv6")
 	}
 
@@ -654,7 +677,10 @@ func updateJumpMap(obj *libbpf.Obj, isHost bool, ipv6Enabled bool) error {
 
 	for _, ipFamily := range ipVersions {
 		for _, idx := range tcdefs.JumpMapIndexes[ipFamily] {
-			if isHost && (idx == tcdefs.ProgIndexPolicy || idx == tcdefs.ProgIndexV6Policy) {
+			if (idx == tcdefs.ProgIndexPolicy || idx == tcdefs.ProgIndexV6Policy) && !ap.hasPolicyProg() {
+				continue
+			}
+			if idx == tcdefs.ProgIndexHostCtConflict && !ap.hasHostConflictProg() {
 				continue
 			}
 			err := obj.UpdateJumpMap(mapName, tcdefs.ProgramNames[idx], idx)

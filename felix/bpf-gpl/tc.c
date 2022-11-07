@@ -45,6 +45,8 @@
 #include "bpf_helpers.h"
 #include "rule_counters.h"
 
+#define HAS_HOST_CONFLICT_PROG CALI_F_TO_HEP
+
 #if !defined(__BPFTOOL_LOADER__)
 const volatile struct cali_tc_globals __globals;
 #endif
@@ -66,6 +68,26 @@ static CALI_BPF_INLINE int calico_tc(struct __sk_buff *skb)
 	 * skip all processing. */
 	if (CALI_F_FROM_HOST && skb->mark == CALI_SKB_MARK_BYPASS) {
 		CALI_INFO("Final result=ALLOW (%d). Bypass mark set.\n", CALI_REASON_BYPASS);
+		if  (CALI_LOG_LEVEL >= CALI_LOG_LEVEL_DEBUG) {
+			/* This generates a bit more richer output for logging */
+			struct cali_tc_ctx ctx = {
+				.state = state_get(),
+				.counters = counters_get(),
+				.skb = skb,
+				.fwd = {
+					.res = TC_ACT_UNSPEC,
+					.reason = CALI_REASON_UNKNOWN,
+				},
+				.ipheader_len = IP_SIZE,
+			};
+			if (!ctx.counters) {
+				CALI_DEBUG("Counters map lookup failed: DROP\n");
+				// We don't want to drop packets just because counters initialization fails, but
+				// failing here normally should not happen.
+				return TC_ACT_SHOT;
+			}
+			parse_packet_ip(&ctx);
+		}
 		return TC_ACT_UNSPEC;
 	}
 
@@ -262,7 +284,7 @@ static CALI_BPF_INLINE void calico_tc_process_ct_lookup(struct cali_tc_ctx *ctx)
 {
 	CALI_DEBUG("conntrack entry flags 0x%x\n", ctx->state->ct_result.flags);
 
-	if (CALI_F_TO_HEP &&
+	if (HAS_HOST_CONFLICT_PROG &&
 			(ctx->state->ct_result.flags & CALI_CT_FLAG_VIA_NAT_IF) &&
 			!(ctx->skb->mark & (CALI_SKB_MARK_FROM_NAT_IFACE_OUT | CALI_SKB_MARK_SEEN))) {
 		CALI_DEBUG("Host source SNAT conflict\n");
@@ -503,6 +525,16 @@ syn_force_policy:
 
 	if (!dest_rt) {
 		CALI_DEBUG("No route for post DNAT dest %x\n", bpf_ntohl(ctx->state->post_nat_ip_dst));
+		if (CALI_F_FROM_HEP) {
+			/* Disable FIB, let the packet go through the host after it is
+			 * policed. It is ingress into the system and we do not know what
+			 * exactly is the packet's destination. It may be a local VM or
+			 * something similar and we let the host to route it or dump it.
+			 *
+			 * https://github.com/projectcalico/calico/issues/6450
+			 */
+			ctx->state->flags |= CALI_ST_SKIP_FIB;
+		}
 		goto do_policy;
 	}
 
@@ -1405,6 +1437,7 @@ deny:
 	return TC_ACT_SHOT;
 }
 
+#if HAS_HOST_CONFLICT_PROG
 SEC("classifier/tc/host_ct_conflict")
 int calico_tc_host_ct_conflict(struct __sk_buff *skb)
 {
@@ -1478,6 +1511,7 @@ int calico_tc_host_ct_conflict(struct __sk_buff *skb)
 deny:
 	return TC_ACT_SHOT;
 }
+#endif /* HAS_HOST_CONFLICT_PROG */
 
 SEC("classifier/tc/drop")
 int calico_tc_skb_drop(struct __sk_buff *skb)
