@@ -178,7 +178,9 @@ const expectedRouteDumpWithTunnelAddr = `10.65.0.0/16: remote in-pool nat-out
 FELIX_0/32: local host
 FELIX_0_TNL/32: local host
 FELIX_1/32: remote host
-FELIX_2/32: remote host`
+FELIX_1_TNL/32: remote host in-pool nat-out tunneled
+FELIX_2/32: remote host
+FELIX_2_TNL/32: remote host in-pool nat-out tunneled`
 
 const extIP = "10.1.2.3"
 
@@ -950,14 +952,22 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 			It("should have correct routes", func() {
 				tunnelAddr := ""
+				tunnelAddrFelix1 := ""
+				tunnelAddrFelix2 := ""
 				expectedRoutes := expectedRouteDump
 				switch {
 				case felixes[0].ExpectedIPIPTunnelAddr != "":
 					tunnelAddr = felixes[0].ExpectedIPIPTunnelAddr
+					tunnelAddrFelix1 = felixes[1].ExpectedIPIPTunnelAddr
+					tunnelAddrFelix2 = felixes[2].ExpectedIPIPTunnelAddr
 				case felixes[0].ExpectedVXLANTunnelAddr != "":
 					tunnelAddr = felixes[0].ExpectedVXLANTunnelAddr
+					tunnelAddrFelix1 = felixes[1].ExpectedVXLANTunnelAddr
+					tunnelAddrFelix2 = felixes[2].ExpectedVXLANTunnelAddr
 				case felixes[0].ExpectedWireguardTunnelAddr != "":
 					tunnelAddr = felixes[0].ExpectedWireguardTunnelAddr
+					tunnelAddrFelix1 = felixes[1].ExpectedWireguardTunnelAddr
+					tunnelAddrFelix2 = felixes[2].ExpectedWireguardTunnelAddr
 				}
 
 				if tunnelAddr != "" {
@@ -984,6 +994,12 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 						l = idxRE.ReplaceAllLiteralString(l, "idx -")
 						if tunnelAddr != "" {
 							l = strings.ReplaceAll(l, tunnelAddr+"/32", "FELIX_0_TNL/32")
+						}
+						if tunnelAddrFelix1 != "" {
+							l = strings.ReplaceAll(l, tunnelAddrFelix1+"/32", "FELIX_1_TNL/32")
+						}
+						if tunnelAddrFelix2 != "" {
+							l = strings.ReplaceAll(l, tunnelAddrFelix2+"/32", "FELIX_2_TNL/32")
 						}
 						filteredLines = append(filteredLines, l)
 					}
@@ -2333,7 +2349,9 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 								cmd, err := bpf.MapDeleteKeyCmd(m, mkey.AsBytes())
 								Expect(err).NotTo(HaveOccurred())
 								err = felixes[0].ExecMayFail(cmd...)
-								Expect(err).NotTo(HaveOccurred())
+								if err != nil {
+									Expect(err.Error()).To(ContainSubstring("No such file or directory"))
+								}
 
 								aff := dumpAffMap(felixes[0])
 								Expect(aff).To(HaveLen(0))
@@ -2473,7 +2491,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 							// then CTLB succeeds.
 							natFtKey := nat.NewNATKey(net.ParseIP(ip), port, numericProto)
 							Eventually(func() bool {
-								m := dumpNATMap(felixes[0])
+								m := dumpNATMap(felixes[1])
 								v, ok := m[natFtKey]
 								if !ok || v.Count() == 0 {
 									return false
@@ -2481,7 +2499,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 								beKey := nat.NewNATBackendKey(v.ID(), 0)
 
-								be := dumpEPMap(felixes[0])
+								be := dumpEPMap(felixes[1])
 								_, ok = be[beKey]
 								return ok
 							}, 5*time.Second).Should(BeTrue())
@@ -3312,26 +3330,27 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 						Eventually(k8sGetEpsForServiceFunc(k8sClient, testSvc), "10s").Should(HaveLen(1),
 							"Service endpoints didn't get created? Is controller-manager happy?")
 
-						flx := felixes[1]
-						if testOpts.connTimeEnabled {
-							flx = felixes[0] // Because the ctlb uses the table created at 0 across all nodes.
-						}
-
-						// sync with NAT table being applied
-						natFtKey := nat.NewNATKey(net.ParseIP(flx.IP), npPort, numericProto)
-
+						// Sync with all felixes because some fwd tests with "none"
+						// connectivity need this to be set on all sides as they will not
+						// retry when there is no connectivity.
 						Eventually(func() bool {
-							m := dumpNATMap(flx)
-							v, ok := m[natFtKey]
-							if !ok || v.Count() == 0 {
-								return false
+							for _, flx := range felixes {
+								natFtKey := nat.NewNATKey(net.ParseIP(flx.IP), npPort, numericProto)
+
+								m := dumpNATMap(flx)
+								v, ok := m[natFtKey]
+								if !ok || v.Count() == 0 {
+									return false
+								}
+
+								beKey := nat.NewNATBackendKey(v.ID(), 0)
+
+								be := dumpEPMap(flx)
+								if _, ok := be[beKey]; !ok {
+									return false
+								}
 							}
-
-							beKey := nat.NewNATBackendKey(v.ID(), 0)
-
-							be := dumpEPMap(flx)
-							_, ok = be[beKey]
-							return ok
+							return true
 						}, 5*time.Second).Should(BeTrue())
 
 						// Sync with policy
@@ -4026,6 +4045,15 @@ func checkNodeConntrack(felixes []*infrastructure.Felix) error {
 				if strings.Contains(line, felix.IP) {
 					continue lineLoop
 				}
+				if felix.ExpectedIPIPTunnelAddr != "" && strings.Contains(line, felix.ExpectedIPIPTunnelAddr) {
+					continue lineLoop
+				}
+				if felix.ExpectedVXLANTunnelAddr != "" && strings.Contains(line, felix.ExpectedVXLANTunnelAddr) {
+					continue lineLoop
+				}
+				if felix.ExpectedWireguardTunnelAddr != "" && strings.Contains(line, felix.ExpectedWireguardTunnelAddr) {
+					continue lineLoop
+				}
 				// Ignore DHCP
 				if strings.Contains(line, "sport=67 dport=68") {
 					continue lineLoop
@@ -4066,7 +4094,7 @@ func conntrackFlushWorkloadEntries(felixes []*infrastructure.Felix) func() {
 						// Expected "error" when there are no matching flows.
 						continue
 					}
-					ExpectWithOffset(1, err).NotTo(HaveOccurred(), "conntrack -F failed")
+					ExpectWithOffset(1, err).NotTo(HaveOccurred(), "conntrack -D failed")
 				}
 			}
 		}
@@ -4075,6 +4103,7 @@ func conntrackFlushWorkloadEntries(felixes []*infrastructure.Felix) func() {
 
 func conntrackChecks(felixes []*infrastructure.Felix) []interface{} {
 	return []interface{}{
+		CheckWithInit(conntrackFlushWorkloadEntries(felixes)),
 		CheckWithFinalTest(conntrackCheck(felixes)),
 		CheckWithBeforeRetry(conntrackFlushWorkloadEntries(felixes)),
 	}
