@@ -167,36 +167,6 @@ static CALI_BPF_INLINE int calico_tc(struct __sk_buff *skb)
 			CALI_DEBUG("Packet approved for forward.\n");
 			COUNTER_INC(&ctx, CALI_REASON_BYPASS);
 			goto allow;
-		case CALI_SKB_MARK_BYPASS_FWD_SRC_FIXUP:
-			CALI_DEBUG("Packet approved for forward - src ip fixup\n");
-			COUNTER_INC(&ctx, CALI_REASON_BYPASS);
-
-			/* we need to fix up the right src host IP */
-			if (skb_refresh_validate_ptrs(&ctx, UDP_SIZE)) {
-				DENY_REASON(&ctx, CALI_REASON_SHORT);
-				CALI_DEBUG("Too short\n");
-				goto deny;
-			}
-
-			__be32 ip_src = ip_hdr(&ctx)->saddr;
-			if (ip_src == HOST_IP) {
-				CALI_DEBUG("src ip fixup not needed %x\n", bpf_ntohl(ip_src));
-				goto allow;
-			} else {
-				CALI_DEBUG("src ip fixup %x\n", bpf_ntohl(HOST_IP));
-			}
-
-			/* XXX do a proper CT lookup to find this */
-			ip_hdr(&ctx)->saddr = HOST_IP;
-			int l3_csum_off = skb_iphdr_offset(&ctx) + offsetof(struct iphdr, check);
-
-			int res = bpf_l3_csum_replace(skb, l3_csum_off, ip_src, HOST_IP, 4);
-			if (res) {
-				DENY_REASON(&ctx, CALI_REASON_CSUM_FAIL);
-				goto deny;
-			}
-
-			goto allow;
 		}
 	}
 
@@ -549,9 +519,9 @@ syn_force_policy:
 	}
 
 	if (CALI_F_TO_HEP && ctx->nat_dest && !skb_seen(ctx->skb) && !(ctx->state->flags & CALI_ST_HOST_PSNAT)) {
-		CALI_DEBUG("Host accesses nodeport backend %x:%d state->flags 0x%x\n",
-			   bpf_htonl(ctx->state->post_nat_ip_dst), ctx->state->post_nat_dport,
-			   ctx->state->flags);
+		CALI_DEBUG("Host accesses nodeport backend %x:%d\n",
+			   bpf_htonl(ctx->state->post_nat_ip_dst), ctx->state->post_nat_dport);
+		CALI_DEBUG("Host accesses nodeport state->flags 0x%x\n", ctx->state->flags);
 		if (cali_rt_flags_local_workload(dest_rt->flags)) {
 			CALI_DEBUG("NP redir on HEP - skip policy\n");
 			ctx->state->flags |= CALI_ST_CT_NP_LOOP;
@@ -1041,8 +1011,8 @@ static CALI_BPF_INLINE struct fwd calico_tc_skb_accepted(struct cali_tc_ctx *ctx
 				goto icmp_too_big;
 			}
 			state->ip_src = HOST_IP;
-			seen_mark = CALI_SKB_MARK_BYPASS_FWD_SRC_FIXUP; /* Do FIB if possible */
-			CALI_DEBUG("marking CALI_SKB_MARK_BYPASS_FWD_SRC_FIXUP\n");
+			seen_mark = CALI_SKB_MARK_BYPASS_FWD; /* Do FIB if possible */
+			CALI_DEBUG("marking CALI_SKB_MARK_BYPASS_FWD\n");
 
 			goto nat_encap;
 		}

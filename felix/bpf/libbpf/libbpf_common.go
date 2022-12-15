@@ -1,5 +1,5 @@
-// Copyright (c) 2017-2018 Tigera, Inc. All rights reserved.
-
+// Copyright (c) 2021-2022 Tigera, Inc. All rights reserved.
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,22 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package health_test
+package libbpf
 
-import (
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-
-	"testing"
-
-	"github.com/onsi/ginkgo/reporters"
-
-	"github.com/projectcalico/calico/libcalico-go/lib/testutils"
-)
-
-func TestHealth(t *testing.T) {
-	testutils.HookLogrusForGinkgo()
-	RegisterFailHandler(Fail)
-	junitReporter := reporters.NewJUnitReporter("../../report/health_suite.xml")
-	RunSpecsWithDefaultAndCustomReporters(t, "Health Suite", []Reporter{junitReporter})
+type TcGlobalData struct {
+	IfaceName    string
+	HostIP       uint32
+	IntfIP       uint32
+	ExtToSvcMark uint32
+	Tmtu         uint16
+	VxlanPort    uint16
+	PSNatStart   uint16
+	PSNatLen     uint16
+	HostTunnelIP uint32
+	Flags        uint32
+	WgPort       uint16
+	NatIn        uint32
+	NatOut       uint32
 }
