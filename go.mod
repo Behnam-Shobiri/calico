@@ -75,7 +75,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.5.6
 	golang.org/x/net v0.4.0
 	golang.org/x/sync v0.1.0
-	golang.org/x/sys v0.3.0
+	golang.org/x/sys v0.5.0
 	golang.org/x/text v0.5.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20200324154536-ceff61240acf
 	google.golang.org/genproto v0.0.0-20221024183307-1bc688fe9f3e
