@@ -6,11 +6,11 @@ require (
 	github.com/BurntSushi/toml v1.2.1
 	github.com/Microsoft/hcsshim v0.8.22
 	github.com/apparentlymart/go-cidr v1.1.0
-	github.com/aws/aws-sdk-go-v2 v1.11.0
+	github.com/aws/aws-sdk-go-v2 v1.17.5
 	github.com/aws/aws-sdk-go-v2/config v1.10.0
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.8.0
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.21.0
-	github.com/aws/smithy-go v1.9.0
+	github.com/aws/smithy-go v1.13.5
 	github.com/buger/jsonparser v1.1.1
 	github.com/container-storage-interface/spec v1.7.0
 	github.com/containernetworking/cni v1.0.1
