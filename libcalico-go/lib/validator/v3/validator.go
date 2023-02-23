@@ -92,6 +92,7 @@ var (
 	routeSource           = regexp.MustCompile("^(WorkloadIPs|CalicoIPAM)$")
 	dropAcceptReturnRegex = regexp.MustCompile("^(Drop|Accept|Return)$")
 	acceptReturnRegex     = regexp.MustCompile("^(Accept|Return)$")
+	dropRejectRegex       = regexp.MustCompile("^(Drop|Reject)$")
 	ipTypeRegex           = regexp.MustCompile("^(CalicoNodeIP|InternalIP|ExternalIP)$")
 	standardCommunity     = regexp.MustCompile(`^(\d+):(\d+)$`)
 	largeCommunity        = regexp.MustCompile(`^(\d+):(\d+):(\d+)$`)
@@ -109,6 +110,9 @@ var (
 	globalSelectorOnly    = fmt.Sprintf("%v cannot be combined with other selectors", globalSelector)
 
 	SourceAddressRegex = regexp.MustCompile("^(UseNodeIP|None)$")
+
+	filterActionRegex  = regexp.MustCompile("^(Accept|Reject)$")
+	matchOperatorRegex = regexp.MustCompile("^(Equal|In|NotEqual|NotIn)$")
 
 	ipv4LinkLocalNet = net.IPNet{
 		IP:   net.ParseIP("169.254.0.0"),
@@ -170,6 +174,7 @@ func init() {
 	registerFieldValidator("bpfServiceMode", validateBPFServiceMode)
 	registerFieldValidator("dropAcceptReturn", validateFelixEtoHAction)
 	registerFieldValidator("acceptReturn", validateAcceptReturn)
+	registerFieldValidator("dropReject", validateDropReject)
 	registerFieldValidator("portName", validatePortName)
 	registerFieldValidator("mustBeNil", validateMustBeNil)
 	registerFieldValidator("mustBeFalse", validateMustBeFalse)
@@ -186,6 +191,14 @@ func init() {
 	registerFieldValidator("wireguardPublicKey", validateWireguardPublicKey)
 	registerFieldValidator("IP:port", validateIPPort)
 	registerFieldValidator("reachableBy", validateReachableByField)
+
+	// Register filter action and match operator validators (used in BGPFilter)
+	registerFieldValidator("filterAction", RegexValidator("FilterAction", filterActionRegex))
+	registerFieldValidator("matchOperator", RegexValidator("MatchOperator", matchOperatorRegex))
+
+	// Register filter action and match operator validators (used in BGPFilter)
+	registerFieldValidator("filterAction", RegexValidator("FilterAction", filterActionRegex))
+	registerFieldValidator("matchOperator", RegexValidator("MatchOperator", matchOperatorRegex))
 
 	// Register network validators (i.e. validating a correctly masked CIDR).  Also
 	// accepts an IP address without a mask (assumes a full mask).
@@ -421,6 +434,12 @@ func validateAcceptReturn(fl validator.FieldLevel) bool {
 	s := fl.Field().String()
 	log.Debugf("Validate Accept Return Action: %s", s)
 	return acceptReturnRegex.MatchString(s)
+}
+
+func validateDropReject(fl validator.FieldLevel) bool {
+	s := fl.Field().String()
+	log.Debugf("Validate Drop Reject Action: %s", s)
+	return dropRejectRegex.MatchString(s)
 }
 
 func validateSelector(fl validator.FieldLevel) bool {

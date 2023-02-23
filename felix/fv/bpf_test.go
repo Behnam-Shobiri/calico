@@ -53,6 +53,7 @@ import (
 	"github.com/projectcalico/calico/felix/bpf"
 	"github.com/projectcalico/calico/felix/bpf/conntrack"
 	"github.com/projectcalico/calico/felix/bpf/ifstate"
+	"github.com/projectcalico/calico/felix/bpf/maps"
 	"github.com/projectcalico/calico/felix/bpf/nat"
 	. "github.com/projectcalico/calico/felix/fv/connectivity"
 	"github.com/projectcalico/calico/felix/fv/containers"
@@ -307,15 +308,17 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 			case "vxlan":
 				options.VXLANMode = api.VXLANModeAlways
 			case "wireguard":
-				// Delay running Felix until Node resource has been created.
-				options.DelayFelixStart = true
-				options.TriggerDelayedFelixStart = true
 				// Allocate tunnel address for Wireguard.
 				options.WireguardEnabled = true
 				// Enable Wireguard.
 				options.ExtraEnvVars["FELIX_WIREGUARDENABLED"] = "true"
 			default:
 				Fail("bad tunnel option")
+			}
+			if testOpts.tunnel != "none" {
+				// Avoid felix restart mid-test, wait for the node resource to be created before starting Felix.
+				options.DelayFelixStart = true
+				options.TriggerDelayedFelixStart = true
 			}
 			options.ExtraEnvVars["FELIX_BPFConnectTimeLoadBalancingEnabled"] = fmt.Sprint(testOpts.connTimeEnabled)
 			options.ExtraEnvVars["FELIX_BPFLogLevel"] = fmt.Sprint(testOpts.bpfLogLevel)
@@ -679,10 +682,10 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 
 				It("should clean up jump maps", func() {
 					numJumpMaps := func() int {
-						command := fmt.Sprintf("find /sys/fs/bpf/tc -name %s", bpf.JumpMapName())
+						command := fmt.Sprintf("find /sys/fs/bpf/tc -name %s", maps.JumpMapName())
 						output, err := felixes[0].ExecOutput("sh", "-c", command)
 						Expect(err).NotTo(HaveOccurred())
-						return strings.Count(output, bpf.JumpMapName())
+						return strings.Count(output, maps.JumpMapName())
 					}
 
 					expJumpMaps := func(numWorkloads int) int {
@@ -1412,6 +1415,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 								Ports:         "57005", // 0xdead
 								Protocol:      testOpts.protocol,
 								InterfaceName: "eth20",
+								MTU:           1500, // Need to match host MTU or felix will restart.
 							}
 							err := eth20.Start()
 							Expect(err).NotTo(HaveOccurred())
@@ -1433,6 +1437,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 								Ports:         "57005", // 0xdead
 								Protocol:      testOpts.protocol,
 								InterfaceName: "eth30",
+								MTU:           1500, // Need to match host MTU or felix will restart.
 							}
 							err = eth30.Start()
 							Expect(err).NotTo(HaveOccurred())
@@ -2383,7 +2388,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 								// Remove the affinity entry to emulate timer
 								// expiring / no prior affinity.
 								m := nat.AffinityMap()
-								cmd, err := bpf.MapDeleteKeyCmd(m, mkey.AsBytes())
+								cmd, err := maps.MapDeleteKeyCmd(m, mkey.AsBytes())
 								Expect(err).NotTo(HaveOccurred())
 								err = felixes[0].ExecMayFail(cmd...)
 								if err != nil {
@@ -3214,6 +3219,7 @@ func describeBPFTests(opts ...bpfTestOpt) bool {
 											Ports:         "57005", // 0xdead
 											Protocol:      testOpts.protocol,
 											InterfaceName: "eth20",
+											MTU:           1500, // Need to match host MTU or felix will restart.
 										}
 										err := eth20.Start()
 										Expect(err).NotTo(HaveOccurred())
@@ -3816,18 +3822,18 @@ func dumpNATMaps(felix *infrastructure.Felix) (nat.MapMem, nat.BackendMapMem) {
 	return dumpNATMap(felix), dumpEPMap(felix)
 }
 
-func dumpBPFMap(felix *infrastructure.Felix, m bpf.Map, iter bpf.IterCallback) {
+func dumpBPFMap(felix *infrastructure.Felix, m maps.Map, iter func(k, v []byte)) {
 	// Wait for the map to exist before trying to access it.  Otherwise, we
 	// might fail a test that was retrying this dump anyway.
 	Eventually(func() bool {
 		return felix.FileExists(m.Path())
 	}, "10s", "300ms").Should(BeTrue(), fmt.Sprintf("dumpBPFMap: map %s didn't show up inside container", m.Path()))
-	cmd, err := bpf.DumpMapCmd(m)
+	cmd, err := maps.DumpMapCmd(m)
 	Expect(err).NotTo(HaveOccurred(), "Failed to get BPF map dump command: "+m.Path())
 	log.WithField("cmd", cmd).Debug("dumpBPFMap")
 	out, err := felix.ExecOutput(cmd...)
 	Expect(err).NotTo(HaveOccurred(), "Failed to get dump BPF map: "+m.Path())
-	if strings.Contains(m.(*bpf.PinnedMap).Type, "percpu") {
+	if strings.Contains(m.(*maps.PinnedMap).Type, "percpu") {
 		err = bpf.IterPerCpuMapCmdOutput([]byte(out), iter)
 	} else {
 		err = bpf.IterMapCmdOutput([]byte(out), iter)
