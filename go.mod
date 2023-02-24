@@ -39,7 +39,7 @@ require (
 	github.com/juju/errors v0.0.0-20200330140219-3fe23663418f
 	github.com/juju/mutex v0.0.0-20180619145857-d21b13acf4bf
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0
-	github.com/kelseyhightower/envconfig v0.0.0-20180517194557-dd1402a4d99d
+	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/kelseyhightower/memkv v0.1.1
 	github.com/libp2p/go-reuseport v0.1.0
 	github.com/mcuadros/go-version v0.0.0-20190308113854-92cdf37c5b75
