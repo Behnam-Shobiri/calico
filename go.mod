@@ -49,11 +49,11 @@ require (
 	github.com/nmrshll/go-cp v0.0.0-20180115193924-61436d3b7cfa
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/onsi/ginkgo v1.16.5
-	github.com/onsi/ginkgo/v2 v2.7.1 // indirect
+	github.com/onsi/ginkgo/v2 v2.7.1
 	github.com/onsi/gomega v1.25.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
-	github.com/pkg/profile v1.6.0
+	github.com/pkg/profile v1.7.0
 	github.com/projectcalico/api v0.0.0-00010101000000-000000000000
 	github.com/projectcalico/go-json v0.0.0-20161128004156-6219dc7339ba
 	github.com/projectcalico/go-yaml-wrapper v0.0.0-20191112210931-090425220c54
@@ -153,6 +153,7 @@ require (
 	github.com/euank/go-kmsg-parser v2.0.0+incompatible // indirect
 	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.2.0 // indirect
+	github.com/felixge/fgprof v0.9.3 // indirect
 	github.com/felixge/httpsnoop v1.0.1 // indirect
 	github.com/form3tech-oss/jwt-go v3.2.3+incompatible // indirect
 	github.com/go-logr/logr v1.2.3 // indirect
@@ -172,6 +173,7 @@ require (
 	github.com/google/gnostic v0.5.7-v3refs // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
+	github.com/google/pprof v0.0.0-20211214055906-6f57359322fd // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.2.1 // indirect
 	github.com/googleapis/gax-go/v2 v2.7.0 // indirect
 	github.com/gophercloud/gophercloud v0.1.0 // indirect
