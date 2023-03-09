@@ -35,8 +35,8 @@ require (
 	github.com/ishidawataru/sctp v0.0.0-20191218070446-00ab2ac2db07
 	github.com/joho/godotenv v1.4.0
 	github.com/json-iterator/go v1.1.12
-	github.com/juju/clock v0.0.0-20190205081909-9c5c9712527c
-	github.com/juju/errors v0.0.0-20200330140219-3fe23663418f
+	github.com/juju/clock v1.0.3
+	github.com/juju/errors v0.0.0-20220203013757-bd733f3c86b9
 	github.com/juju/mutex v0.0.0-20180619145857-d21b13acf4bf
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0
 	github.com/kelseyhightower/envconfig v0.0.0-20180517194557-dd1402a4d99d
@@ -49,7 +49,7 @@ require (
 	github.com/nmrshll/go-cp v0.0.0-20180115193924-61436d3b7cfa
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/onsi/ginkgo v1.16.5
-	github.com/onsi/ginkgo/v2 v2.7.1 // indirect
+	github.com/onsi/ginkgo/v2 v2.7.1
 	github.com/onsi/gomega v1.25.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
@@ -183,7 +183,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.0.1 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
-	github.com/juju/testing v0.0.0-20200608005635-e4eedbc6f7aa // indirect
 	github.com/karrick/godirwalk v1.16.1 // indirect
 	github.com/leodido/go-urn v0.0.0-20181204092800-a67a23e1c1af // indirect
 	github.com/libopenstorage/openstorage v1.0.0 // indirect
