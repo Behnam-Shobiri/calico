@@ -19,7 +19,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/distribution/distribution v2.8.1+incompatible
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
-	github.com/envoyproxy/go-control-plane v0.9.9-0.20210512163311-63b5d3c536b0
+	github.com/envoyproxy/go-control-plane v0.11.0
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-ini/ini v1.63.2
@@ -49,7 +49,7 @@ require (
 	github.com/nmrshll/go-cp v0.0.0-20180115193924-61436d3b7cfa
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/onsi/ginkgo v1.16.5
-	github.com/onsi/ginkgo/v2 v2.7.1 // indirect
+	github.com/onsi/ginkgo/v2 v2.7.1
 	github.com/onsi/gomega v1.25.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
@@ -139,7 +139,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/checkpoint-restore/go-criu/v5 v5.3.0 // indirect
 	github.com/cilium/ebpf v0.7.0 // indirect
-	github.com/cncf/xds/go v0.0.0-20210312221358-fbca930ec8ed // indirect
+	github.com/cncf/xds/go v0.0.0-20220314180256-7f1daf1720fc // indirect
 	github.com/containerd/cgroups v1.0.1 // indirect
 	github.com/containerd/console v1.0.3 // indirect
 	github.com/containerd/ttrpc v1.0.2 // indirect
@@ -149,7 +149,7 @@ require (
 	github.com/docker/distribution v2.8.1+incompatible // indirect
 	github.com/docker/go-units v0.4.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.8.0 // indirect
-	github.com/envoyproxy/protoc-gen-validate v0.1.0 // indirect
+	github.com/envoyproxy/protoc-gen-validate v0.9.1 // indirect
 	github.com/euank/go-kmsg-parser v2.0.0+incompatible // indirect
 	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.2.0 // indirect
@@ -176,7 +176,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.7.0 // indirect
 	github.com/gophercloud/gophercloud v0.1.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway v1.16.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/heketi/heketi v10.3.0+incompatible // indirect
 	github.com/imdario/mergo v0.3.8 // indirect
@@ -241,7 +241,7 @@ require (
 	go.opentelemetry.io/otel/sdk/export/metric v0.20.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v0.20.0 // indirect
 	go.opentelemetry.io/otel/trace v0.20.0 // indirect
-	go.opentelemetry.io/proto/otlp v0.7.0 // indirect
+	go.opentelemetry.io/proto/otlp v0.19.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect
