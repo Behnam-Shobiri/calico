@@ -15,7 +15,7 @@ require (
 	github.com/container-storage-interface/spec v1.7.0
 	github.com/containernetworking/cni v1.0.1
 	github.com/containernetworking/plugins v1.0.1
-	github.com/coreos/go-semver v0.3.0
+	github.com/coreos/go-semver v0.3.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/distribution/distribution v2.8.1+incompatible
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
@@ -49,7 +49,7 @@ require (
 	github.com/nmrshll/go-cp v0.0.0-20180115193924-61436d3b7cfa
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/onsi/ginkgo v1.16.5
-	github.com/onsi/ginkgo/v2 v2.7.1 // indirect
+	github.com/onsi/ginkgo/v2 v2.7.1
 	github.com/onsi/gomega v1.25.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/errors v0.9.1
