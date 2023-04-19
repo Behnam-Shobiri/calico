@@ -69,7 +69,7 @@ global_job_config:
     - mkdir artifacts
     # Semaphore is doing shallow clone on a commit without tags.
     # unshallow it for GIT_VERSION:=$(shell git describe --tags --dirty --always)
-    - git fetch --unshallow
+    - retry git fetch --unshallow
     # Semaphore mounts a copy-on-write FS as /var/lib/docker in order to provide a pre-loaded cache of
     # some images. However, the cache is not useful to us and the copy-on-write FS is a big problem given
     # how much we churn docker containers during the build.  Disable it.
@@ -123,7 +123,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd apiserver
@@ -140,7 +140,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd apiserver
@@ -171,7 +171,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     jobs:
     - name: "Typha: UT and FV tests"
       commands:
@@ -202,7 +202,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd felix
@@ -239,7 +239,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd felix
@@ -433,7 +433,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-8
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd node
@@ -458,7 +458,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd node
@@ -481,7 +481,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-8
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     jobs:
     - name: "sig-network conformance"
       env_vars:
@@ -498,7 +498,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd kube-controllers

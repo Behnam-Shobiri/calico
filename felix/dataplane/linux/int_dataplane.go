@@ -290,7 +290,6 @@ type InternalDataplane struct {
 	managersWithRouteTables []ManagerWithRouteTables
 	managersWithRouteRules  []ManagerWithRouteRules
 	ruleRenderer            rules.RuleRenderer
-	defaultRuleRenderer     rules.DefaultRuleRenderer
 
 	// datastoreInSync is set to true after we receive the "in sync" message from the datastore.
 	// We delay programming of the dataplane until we're in sync with the datastore.
@@ -1367,6 +1366,7 @@ func (d *InternalDataplane) doStaticDataplaneConfig() {
 	d.configureKernel()
 
 	if d.config.BPFEnabled {
+		d.setUpIptablesBPFEarly()
 		d.setUpIptablesBPF()
 	} else {
 		d.setUpIptablesNormal()
@@ -1381,6 +1381,18 @@ func (d *InternalDataplane) doStaticDataplaneConfig() {
 	} else {
 		log.Info("IPIP disabled. Not starting tunnel update thread.")
 	}
+}
+
+func bpfMarkPreestablishedFlowsRules() []iptables.Rule {
+	return []iptables.Rule{{
+		Match: iptables.Match().
+			ConntrackState("ESTABLISHED,RELATED"),
+		Comment: []string{"Mark pre-established flows."},
+		Action: iptables.SetMaskedMarkAction{
+			Mark: tcdefs.MarkLinuxConntrackEstablished,
+			Mask: tcdefs.MarkLinuxConntrackEstablishedMask,
+		},
+	}}
 }
 
 func (d *InternalDataplane) setUpIptablesBPF() {
@@ -1410,30 +1422,20 @@ func (d *InternalDataplane) setUpIptablesBPF() {
 			},
 			iptables.Rule{
 				Match:   iptables.Match().MarkMatchesWithMask(tcdefs.MarkSeenFallThrough, tcdefs.MarkSeenFallThroughMask),
-				Comment: []string{fmt.Sprintf("%s packets from unknown flows.", d.defaultRuleRenderer.IptablesFilterDenyAction)},
-				Action:  d.defaultRuleRenderer.IptablesFilterDenyAction,
+				Comment: []string{fmt.Sprintf("%s packets from unknown flows.", d.ruleRenderer.IptablesFilterDenyAction())},
+				Action:  d.ruleRenderer.IptablesFilterDenyAction(),
 			},
 		)
 
 		// Mark traffic leaving the host that already has an established linux conntrack entry.
-		outputRules = append(outputRules,
-			iptables.Rule{
-				Match: iptables.Match().
-					ConntrackState("ESTABLISHED,RELATED"),
-				Comment: []string{"Mark pre-established host flows."},
-				Action: iptables.SetMaskedMarkAction{
-					Mark: tcdefs.MarkLinuxConntrackEstablished,
-					Mask: tcdefs.MarkLinuxConntrackEstablishedMask,
-				},
-			},
-		)
+		outputRules = append(outputRules, bpfMarkPreestablishedFlowsRules()...)
 
 		for _, prefix := range rulesConfig.WorkloadIfacePrefixes {
 			fwdRules = append(fwdRules,
 				// Drop/reject packets that have come from a workload but have not been through our BPF program.
 				iptables.Rule{
 					Match:   iptables.Match().InInterface(prefix+"+").NotMarkMatchesWithMask(tcdefs.MarkSeen, tcdefs.MarkSeenMask),
-					Action:  d.defaultRuleRenderer.IptablesFilterDenyAction,
+					Action:  d.ruleRenderer.IptablesFilterDenyAction(),
 					Comment: []string{"From workload without BPF seen mark"},
 				},
 			)
@@ -1450,7 +1452,7 @@ func (d *InternalDataplane) setUpIptablesBPF() {
 			// Catch any workload to host packets that haven't been through the BPF program.
 			inputRules = append(inputRules, iptables.Rule{
 				Match:  iptables.Match().InInterface(prefix+"+").NotMarkMatchesWithMask(tcdefs.MarkSeen, tcdefs.MarkSeenMask),
-				Action: d.defaultRuleRenderer.IptablesFilterDenyAction,
+				Action: d.ruleRenderer.IptablesFilterDenyAction(),
 			})
 		}
 
@@ -1469,23 +1471,13 @@ func (d *InternalDataplane) setUpIptablesBPF() {
 				// In BPF mode, we don't support IPv6 yet.  Drop it.
 				fwdRules = append(fwdRules, iptables.Rule{
 					Match:   iptables.Match().OutInterface(prefix + "+"),
-					Action:  d.defaultRuleRenderer.IptablesFilterDenyAction,
+					Action:  d.ruleRenderer.IptablesFilterDenyAction(),
 					Comment: []string{"To workload, drop IPv6."},
 				})
 			}
 		} else {
 			// Let the BPF programs know if Linux conntrack knows about the flow.
-			fwdRules = append(fwdRules,
-				iptables.Rule{
-					Match: iptables.Match().
-						ConntrackState("ESTABLISHED,RELATED"),
-					Comment: []string{"Mark pre-established flows."},
-					Action: iptables.SetMaskedMarkAction{
-						Mark: tcdefs.MarkLinuxConntrackEstablished,
-						Mask: tcdefs.MarkLinuxConntrackEstablishedMask,
-					},
-				},
-			)
+			fwdRules = append(fwdRules, bpfMarkPreestablishedFlowsRules()...)
 			// The packet may be about to go to a local workload.  However, the local workload may not have a BPF
 			// program attached (yet).  To catch that case, we send the packet through a dispatch chain.  We only
 			// add interfaces to the dispatch chain if the BPF program is in place.
@@ -1559,6 +1551,42 @@ func (d *InternalDataplane) setUpIptablesBPF() {
 				Comment: []string{"Mark connections with ExtToServiceConnmark"},
 				Action:  iptables.SetConnMarkAction{Mark: mark, Mask: mark},
 			}})
+		}
+	}
+}
+
+// setUpIptablesBPFEarly that need to be written asap
+func (d *InternalDataplane) setUpIptablesBPFEarly() {
+	rules := bpfMarkPreestablishedFlowsRules()
+
+	for _, t := range d.iptablesFilterTables {
+		// We want to prevent inserting the rules over and over again if something later
+		// crashed. We do not expect that we would insert just a part of the batch as that
+		// should be handled by the iptables-restore transaction.  Never the less if we
+		// see that unexpected case, perhaps due to an upgrade, we skip over updating the
+		// iptables now and will wait for the full resync. That could be temporarily
+		// disrupting.
+		if present := t.CheckRulesPresent("FORWARD", rules); present != nil {
+			if len(present) != len(rules) {
+				log.WithField("presentRules", present).
+					Warn("Some early rules on filter FORWARD, skipping adding other, full resync will resolve it.")
+			}
+		} else {
+			if err := t.InsertRulesNow("FORWARD", rules); err != nil {
+				log.WithError(err).
+					Warn("Failed inserting some early rules to filter FORWARD, some flows may get temporarily disrupted.")
+			}
+		}
+		if present := t.CheckRulesPresent("OUTPUT", rules); present != nil {
+			if len(present) != len(rules) {
+				log.WithField("presentRules", present).
+					Warn("Some early rules on filter OUTPUT, skipping adding other, full resync will resolve it.")
+			}
+		} else {
+			if err := t.InsertRulesNow("OUTPUT", rules); err != nil {
+				log.WithError(err).
+					Warn("Failed inserting some early rules to filter OUTPUT, some flows may get temporarily disrupted.")
+			}
 		}
 	}
 }
