@@ -73,8 +73,10 @@ bin/csi-driver-amd64: $(SRC_FILES)
 UPSTREAM_REGISTRAR_PROJECT ?= kubernetes-csi/$(REGISTRAR_IMAGE)
 UPSTREAM_REGISTRAR_TAG     ?= v2.6.3
 
+REGISTRAR_TIGERA_BUILD_CMD_LDFLAGS = -ldflags '-extldflags "-static" -linkmode external'
+
 REGISTRAR_TIGERA_BUILD_CMD="cd /go/src/github.com/$(UPSTREAM_REGISTRAR_PROJECT) && \
-                    			  go build -buildvcs=false -tags $(TAGS) -v -o bin/csi-node-driver-registrar cmd/csi-node-driver-registrar/*.go"
+                    			  go build -buildvcs=false $(REGISTRAR_TIGERA_BUILD_CMD_LDFLAGS) -tags $(TAGS) -v -o bin/csi-node-driver-registrar cmd/csi-node-driver-registrar/*.go"
 REGISTRAR_UPSTREAM_BUILD_CMD="cd /go/src/github.com/$(UPSTREAM_REGISTRAR_PROJECT) && \
 							      make build BUILD_PLATFORMS=$(BUILD_PLATFORMS)"
 
@@ -112,7 +114,7 @@ bin/node-driver-registrar-%: clone-registrar-upstream
 clone-registrar-upstream:
 ifeq ("$(wildcard ./$(REGISTRAR_IMAGE))", "")
 	@echo "Directory does not exist."
-	git clone --depth 1 --branch $(UPSTREAM_REGISTRAR_TAG) --single-branch git@github.com:$(UPSTREAM_REGISTRAR_PROJECT).git
+	git clone --depth 1 --branch $(UPSTREAM_REGISTRAR_TAG) --single-branch https://github.com/$(UPSTREAM_REGISTRAR_PROJECT).git
 else
 	@echo "Upstream repo already cloned."
 endif
