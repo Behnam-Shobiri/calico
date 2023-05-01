@@ -59,7 +59,7 @@ require (
 	github.com/projectcalico/go-yaml-wrapper v0.0.0-20191112210931-090425220c54
 	github.com/prometheus/client_golang v1.14.0
 	github.com/prometheus/client_model v0.3.0
-	github.com/prometheus/common v0.37.0
+	github.com/prometheus/common v0.42.0
 	github.com/rakelkar/gonetsh v0.3.2
 	github.com/satori/go.uuid v1.2.0
 	github.com/shirou/gopsutil v0.0.0-20190323131628-2cbc9195c892
@@ -93,7 +93,7 @@ require (
 	k8s.io/component-base v0.26.3
 	k8s.io/klog/v2 v2.80.1
 	k8s.io/kube-openapi v0.0.0-20230303024457-afdc3dddf62d
-	k8s.io/kubernetes v1.26.3
+	k8s.io/kubernetes v0.0.0-00010101000000-000000000000
 	k8s.io/utils v0.0.0-20230313181309-38a27ef9d749
 	modernc.org/memory v1.5.0
 	sigs.k8s.io/kind v0.11.1
@@ -186,7 +186,7 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/matttproud/golang_protobuf_extensions v1.0.2 // indirect
+	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/mdlayher/genetlink v1.0.0 // indirect
 	github.com/mdlayher/netlink v1.1.0 // indirect
 	github.com/mindprince/gonvml v0.0.0-20190828220739-9ebdce4bb989 // indirect
@@ -241,7 +241,7 @@ require (
 	go.uber.org/zap v1.21.0 // indirect
 	golang.org/x/crypto v0.1.0 // indirect
 	golang.org/x/mod v0.8.0 // indirect
-	golang.org/x/oauth2 v0.0.0-20221014153046-6fdb5e3db783 // indirect
+	golang.org/x/oauth2 v0.5.0 // indirect
 	golang.org/x/term v0.6.0 // indirect
 	golang.org/x/time v0.1.0 // indirect
 	golang.org/x/tools v0.6.0 // indirect
