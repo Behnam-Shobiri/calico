@@ -92,9 +92,9 @@ require (
 	k8s.io/client-go v0.26.3
 	k8s.io/code-generator v0.26.3
 	k8s.io/component-base v0.26.3
-	k8s.io/klog/v2 v2.80.1
+	k8s.io/klog/v2 v2.100.1
 	k8s.io/kube-openapi v0.0.0-20230303024457-afdc3dddf62d
-	k8s.io/kubernetes v1.26.3
+	k8s.io/kubernetes v0.0.0-00010101000000-000000000000
 	k8s.io/utils v0.0.0-20230313181309-38a27ef9d749
 	modernc.org/memory v1.5.0
 	sigs.k8s.io/kind v0.11.1
