@@ -48,7 +48,7 @@ ifeq ($(findstring x86_64,$(TRIPLET)),x86_64)
 else ifeq ($(findstring aarch64,$(TRIPLET)),aarch64)
 	CFLAGS += -D__TARGET_ARCH_arm64
 endif
-CC := clang-16
+CC := clang-17
 LD := llc
 
 UT_C_FILES:=$(shell find ut -name '*.c')
@@ -158,12 +158,11 @@ bin:
 
 %.d: %.c
 	set -e; rm -f $@; \
-		$(CC) -M -MT $(subst .c,.o,$<) -I. $(CFLAGS) $< > $@.$$$$ || { rm -f $@.$$$$; false; } ; \
+		$(CC) -M $(CFLAGS) $< > $@.$$$$ || { rm -f $@.$$$$; false; } ; \
 		sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@; \
 		rm -f $@.$$$$
 
 D_FILES=$(C_FILES:.c=.d)
-D_FILES+=$(UT_C_FILES:.c=.d)
 
 ifneq ($(MAKECMDGOALS),clean)
 include $(D_FILES)
