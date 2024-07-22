@@ -1,10 +1,12 @@
-# Copyright (c) 2021 Tigera, Inc. All rights reserved.
+#!/bin/bash
+# Copyright (c) 2023 Tigera, Inc. All rights reserved.
+# Copyright 2020 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http:#www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,7 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script is run from the main Calico folder.
-. .\config.ps1
+unset -f retry_command
+function retry_command() {
+  local RETRY=$(($1/10))
+  local CMD=$2
+  echo
 
-.\calico-node.exe -upgrade-windows
+  for i in `seq 1 $RETRY`; do
+    echo Trying $CMD, attempt ${i}
+    $CMD && return 0 || sleep 10
+  done
+  echo "Command '${CMD}' failed after $RETRY attempts"
+  return 1
+}
+

@@ -39,6 +39,7 @@ import (
 
 	"github.com/projectcalico/calico/felix/calc"
 	"github.com/projectcalico/calico/felix/ipsets"
+	"github.com/projectcalico/calico/felix/nftables"
 	"github.com/projectcalico/calico/felix/rules"
 )
 
@@ -138,6 +139,9 @@ func GetCommandOutput(command string, args ...string) (string, error) {
 	cmd := Command(command, args...)
 	log.Infof("Running '%s %s'", cmd.Path, strings.Join(cmd.Args, " "))
 	output, err := cmd.CombinedOutput()
+	if err != nil {
+		err = fmt.Errorf("command failed %q: %w", cmd, err)
+	}
 	return string(output), err
 }
 
@@ -149,7 +153,6 @@ func RunCommand(command string, args ...string) error {
 
 func Command(name string, args ...string) *exec.Cmd {
 	log.Debugf("Creating Command [%s].", formatCommand(name, args))
-
 	return exec.Command(name, args...)
 }
 
@@ -229,6 +232,11 @@ func IPSetNameForSelector(ipVersion int, rawSelector string) string {
 	return ipVerConf.NameForMainIPSet(setID)
 }
 
+func NFTSetNameForSelector(ipVersion int, rawSelector string) string {
+	base := IPSetNameForSelector(ipVersion, rawSelector)
+	return nftables.LegalizeSetName(base)
+}
+
 // HasSyscallConn represents objects that can return a syscall.RawConn
 type HasSyscallConn interface {
 	SyscallConn() (syscall.RawConn, error)
@@ -247,7 +255,6 @@ func ConnMTU(hsc HasSyscallConn) (int, error) {
 	err = c.Control(func(fd uintptr) {
 		mtu, sysErr = syscall.GetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_MTU)
 	})
-
 	if err != nil {
 		return 0, err
 	}

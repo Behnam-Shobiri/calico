@@ -43,7 +43,6 @@ const (
 )
 
 var _ = Context("Config update tests, after starting felix", func() {
-
 	var (
 		etcd          *containers.Container
 		tc            infrastructure.TopologyContainers
@@ -55,12 +54,14 @@ var _ = Context("Config update tests, after starting felix", func() {
 	)
 
 	BeforeEach(func() {
+		if NFTMode() {
+			Skip("TODO: Implement for NFT")
+		}
 		tc, etcd, client, infra = infrastructure.StartSingleNodeEtcdTopology(infrastructure.DefaultTopologyOptions())
 		felixPID = tc.Felixes[0].GetSinglePID("calico-felix")
 	})
 
 	AfterEach(func() {
-
 		if CurrentGinkgoTestDescription().Failed {
 			tc.Felixes[0].Exec("iptables-save", "-c")
 			tc.Felixes[0].Exec("ip", "r")
@@ -243,7 +244,7 @@ func waitForFelixInSync(felix *infrastructure.Felix) {
 	// The datastore should transition to in-sync.
 	Eventually(func() (int, error) {
 		return metrics.GetFelixMetricInt(felix.IP, "felix_resync_state")
-	}).Should(Equal(3 /* in-sync */))
+	}, "2s").Should(Equal(3 /* in-sync */))
 	// And then we should see at least one apply to the dataplane.
 	Eventually(func() (int, error) {
 		return metrics.GetFelixMetricInt(felix.IP, "felix_int_dataplane_apply_time_seconds_count")

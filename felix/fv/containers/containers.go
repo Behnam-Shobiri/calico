@@ -16,6 +16,7 @@ package containers
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -358,7 +359,7 @@ func (c *Container) copyOutputToLog(streamName string, stream io.Reader, done *s
 	// We do this for all containers because we already have the machinery here.
 	foundDataRace := false
 	dataRaceText := ""
-	dataRaceFile, err := os.OpenFile("data-races.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	dataRaceFile, err := os.OpenFile("data-races.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.WithError(err).Error("Failed to open data race log file.")
 	}
@@ -446,7 +447,7 @@ func (c *Container) DockerInspect(format string) string {
 		c.Name,
 	)
 	outputBytes, err := inspectCmd.CombinedOutput()
-	Expect(err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to run %q", inspectCmd))
 	return string(outputBytes)
 }
 
@@ -586,7 +587,7 @@ func (c *Container) WaitUntilRunning() {
 
 		cmd := utils.Command("docker", "ps")
 		out, err := cmd.CombinedOutput()
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred(), "Failed to run 'docker ps'")
 		if strings.Contains(string(out), c.Name) {
 			break
 		}
@@ -603,7 +604,7 @@ func (c *Container) Stopped() bool {
 func (c *Container) ListedInDockerPS() bool {
 	cmd := utils.Command("docker", "ps")
 	out, err := cmd.CombinedOutput()
-	Expect(err).NotTo(HaveOccurred())
+	Expect(err).NotTo(HaveOccurred(), "Failed to run 'docker ps'")
 	return strings.Contains(string(out), c.Name)
 }
 
@@ -657,7 +658,7 @@ func (c *Container) ExecOutput(args ...string) (string, error) {
 	cmd := utils.Command("docker", arg...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to make a pipe for stderr %q: %w", cmd, err)
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -666,9 +667,10 @@ func (c *Container) ExecOutput(args ...string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if out == nil {
-			return "", err
+			return "", fmt.Errorf("command failed with no output %q: %w", cmd, err)
 		}
-		return string(out), err
+		outStr := string(out)
+		return outStr, fmt.Errorf("command failed %q: %w output=%q", cmd, err, outStr)
 	}
 	return string(out), nil
 }
@@ -686,9 +688,10 @@ func (c *Container) ExecCombinedOutput(args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if out == nil {
-			return "", err
+			return "", fmt.Errorf("command failed with no output %q: %w", cmd, err)
 		}
-		return string(out), err
+		outStr := string(out)
+		return outStr, fmt.Errorf("command failed %q: %w output=%q", cmd, err, outStr)
 	}
 	return string(out), nil
 }
@@ -732,10 +735,10 @@ func (c *Container) IPSetSizeFn(ipSetName string) func() int {
 }
 
 func (c *Container) IPSetSizes() map[string]int {
+	numMembers := map[string]int{}
 	args := []string{"ipset", "list"}
 	ipsetsOutput, err := c.ExecOutput(args...)
 	Expect(err).NotTo(HaveOccurred())
-	numMembers := map[string]int{}
 	currentName := ""
 	membersSeen := false
 	log.WithField("ipsets", ipsetsOutput).Info("IP sets state")
@@ -754,7 +757,59 @@ func (c *Container) IPSetSizes() map[string]int {
 	return numMembers
 }
 
+func (c *Container) NFTSetSizes() map[string]int {
+	numMembers := map[string]int{}
+	names := c.IPSetNames()
+	for _, name := range names {
+		numMembers[name] = c.NumNFTSetMembers(4, name)
+	}
+	return numMembers
+}
+
+func (c *Container) NFTSetSize(name string) int {
+	return c.NFTSetSizes()[name]
+}
+
+func (c *Container) NFTSetSizeFn(name string) func() int {
+	return func() int {
+		return c.NFTSetSizes()[name]
+	}
+}
+
+func (c *Container) NumNFTSetMembers(ipVersion int, setName string) int {
+	ip := "ip"
+	if ipVersion == 6 {
+		ip = "ip6"
+	}
+	out, err := c.ExecOutput("nft", "--json", "list", "set", ip, "calico", setName)
+	Expect(err).NotTo(HaveOccurred())
+
+	type nftResp struct {
+		Nftables []map[string]interface{} `json:"nftables"`
+	}
+	var resp nftResp
+	Expect(json.Unmarshal([]byte(out), &resp)).NotTo(HaveOccurred(), fmt.Sprintf("Failed to unmarshal JSON: %s", out))
+	for _, obj := range resp.Nftables {
+		if obj["set"] != nil {
+			setObj, ok := obj["set"].(map[string]interface{})
+			Expect(ok).To(BeTrue(), fmt.Sprintf("Failed to parse set: %v", obj))
+			if _, ok := setObj["elem"]; !ok {
+				// No elements.
+				return 0
+			}
+			elems, ok := setObj["elem"].([]interface{})
+			Expect(ok).To(BeTrue(), fmt.Sprintf("Failed to parse elem: %v", setObj))
+			return len(elems)
+		}
+	}
+	return len(out)
+}
+
 func (c *Container) IPSetNames() []string {
+	if os.Getenv("FELIX_FV_NFTABLES") == "Enabled" {
+		return c.nftablesSetNames()
+	}
+
 	out, err := c.ExecOutput("ipset", "list", "-name")
 	Expect(err).NotTo(HaveOccurred())
 	out = strings.Trim(out, "\n")
@@ -762,6 +817,20 @@ func (c *Container) IPSetNames() []string {
 		return nil
 	}
 	return strings.Split(out, "\n")
+}
+
+func (c *Container) nftablesSetNames() []string {
+	out, err := c.ExecOutput("nft", "list", "sets", "ip")
+	Expect(err).NotTo(HaveOccurred(), out)
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "set ") {
+			// set <name> {
+			names = append(names, strings.Fields(line)[1])
+		}
+	}
+	return names
 }
 
 func (c *Container) NumIPSets() int {

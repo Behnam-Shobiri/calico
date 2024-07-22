@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2024 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package common
+package ipsets
 
 import (
 	log "github.com/sirupsen/logrus"
@@ -33,6 +33,7 @@ type IPSetsDataplane interface {
 	QueueResync()
 	ApplyUpdates()
 	ApplyDeletions() (reschedule bool)
+	SetFilter(neededIPSets set.Set[string])
 }
 
 // Except for domain IP sets, IPSetsManager simply passes through IP set updates from the datastore
