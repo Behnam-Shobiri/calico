@@ -559,8 +559,10 @@ func (s *IPSets) resyncIPSet(ipSetName string) error {
 				// Start of a Members entry, following this, there'll be one member per
 				// line then EOF or a blank line.
 
-				// Look up to see if this is one of our IP sets.
-				if !s.IPVersionConfig.OwnsIPSet(ipSetName) || s.IPVersionConfig.IsTempIPSetName(ipSetName) {
+				// Optimisation: skip parsing temporary IP set members.
+				// We only need to track their metadata to make sure they
+				// are deleted.
+				if s.IPVersionConfig.IsTempIPSetName(ipSetName) {
 					if debug {
 						s.logCxt.WithField("name", ipSetName).Debug("Skip parsing members of IP set.")
 					}
@@ -651,6 +653,12 @@ func (s *IPSets) runIPSetList(arg string, parsingFunc func(*bufio.Scanner) error
 	// Use a scanner to chunk the input into lines.
 	scanner := bufio.NewScanner(out)
 	parsingErr := parsingFunc(scanner)
+	if parsingErr == nil {
+		// In case the parsingFunc stopped early, drain stdout fully.
+		for scanner.Scan() {
+		}
+		parsingErr = scanner.Err()
+	}
 	closeErr := out.Close()
 	err = cmd.Wait()
 	logCxt := s.logCxt.WithField("stderr", stderr.String())
@@ -814,6 +822,13 @@ func (s *IPSets) writeUpdates(setName string, w io.Writer) (err error) {
 	// If the metadata needs to change then we have to write to a temporary IP
 	// set and swap it into place.
 	needTempIPSet := dpExists && dpMeta != desiredMeta
+	if needTempIPSet {
+		log.WithFields(log.Fields{
+			"desired":   desiredMeta,
+			"dataplane": dpMeta,
+			"setName":   setName,
+		}).Info("IP set metadata change, need to use a temporary IP set.")
+	}
 	// If the IP set doesn't exist yet, we need to create it.
 	needCreate := !dpExists
 
