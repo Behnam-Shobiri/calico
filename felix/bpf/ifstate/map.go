@@ -35,7 +35,7 @@ func SetMapSize(size int) {
 const (
 	KeySize    = 4
 	ValueSize  = 4 + 16 + 3*4 + 3*4 + 2*4
-	MaxEntries = 1000
+	MaxEntries = 1000 // must be the same as IFACE_STATE_MAP_SIZE in ifstate.h
 )
 
 const (

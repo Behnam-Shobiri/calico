@@ -36,7 +36,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	adminpolicy "sigs.k8s.io/network-policy-api/apis/v1alpha1"
+	clusternetpolicy "sigs.k8s.io/network-policy-api/apis/v1alpha2"
 	adminpolicyclient "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned/typed/apis/v1alpha1"
+	netpolicyclient "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned/typed/apis/v1alpha2"
 
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
 	libapiv3 "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
@@ -134,29 +136,20 @@ var (
 // cb implements the callback interface required for the
 // backend Syncer API.
 type cb struct {
-	// Stores the current state for comparison by the tests.
-	State map[string]api.Update
-	Lock  *sync.Mutex
-
+	Lock       *sync.Mutex
+	state      map[string]api.Update
 	status     api.SyncStatus
-	updateChan chan api.Update
+	updateChan chan any
 }
 
-func (c cb) OnStatusUpdated(status api.SyncStatus) {
+func (c *cb) OnStatusUpdated(status api.SyncStatus) {
 	defer GinkgoRecover()
 
-	// Keep latest status up to date.
-	log.Warnf("[TEST] Received status update: %+v", status)
-	c.status = status
-
-	// Once we get in sync, we don't ever expect to not
-	// be in sync.
-	if c.status == api.InSync {
-		Expect(status).To(Equal(api.InSync))
-	}
+	log.Infof("[TEST] Syncer status received: %v", status)
+	c.updateChan <- status
 }
 
-func (c cb) OnUpdates(updates []api.Update) {
+func (c *cb) OnUpdates(updates []api.Update) {
 	defer GinkgoRecover()
 
 	// Ensure the given updates are valid.
@@ -182,28 +175,45 @@ func (c cb) OnUpdates(updates []api.Update) {
 	}
 }
 
-func (c cb) ProcessUpdates() {
+func (c *cb) ProcessUpdates() {
 	for u := range c.updateChan {
 		// Store off the update so it can be checked by the test.
 		// Use a mutex for safe cross-goroutine reads/writes.
 		c.Lock.Lock()
-		if u.UpdateType == api.UpdateTypeKVUnknown {
-			// We should never get this!
-			log.Panic("Received Unknown update type")
-		} else if u.UpdateType == api.UpdateTypeKVDeleted {
-			// Deleted.
-			delete(c.State, u.Key.String())
-			log.Infof("[TEST] Delete update %s", u.Key.String())
-		} else {
-			// Add or modified.
-			c.State[u.Key.String()] = u
-			log.Infof("[TEST] Stored update (type %d) %s", u.UpdateType, u.Key.String())
+
+		switch u := u.(type) {
+		case api.SyncStatus:
+			if c.status == api.InSync {
+				Expect(u).To(Equal(api.InSync), "Should not transition out of InSync state")
+			} else {
+				c.status = u
+			}
+		case api.Update:
+			if u.UpdateType == api.UpdateTypeKVUnknown {
+				// We should never get this!
+				log.Panic("Received Unknown update type")
+			} else if u.UpdateType == api.UpdateTypeKVDeleted {
+				// Deleted.
+				delete(c.state, u.Key.String())
+				log.Infof("[TEST] Delete update %s", u.Key.String())
+			} else {
+				// Add or modified.
+				c.state[u.Key.String()] = u
+				log.Infof("[TEST] Stored update (type %d) %s", u.UpdateType, u.Key.String())
+			}
 		}
+
 		c.Lock.Unlock()
 	}
 }
 
-func (c cb) ExpectExists(updates []api.Update) {
+func (c *cb) GetStatus() api.SyncStatus {
+	c.Lock.Lock()
+	defer c.Lock.Unlock()
+	return c.status
+}
+
+func (c *cb) ExpectExists(updates []api.Update) {
 	// For each Key, wait for it to exist.
 	for _, update := range updates {
 		log.Infof("[TEST] Expecting key: %v", update.Key)
@@ -212,7 +222,7 @@ func (c cb) ExpectExists(updates []api.Update) {
 		_ = wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 60*time.Second, true, func(ctx context.Context) (bool, error) {
 			// Get the update.
 			c.Lock.Lock()
-			u, ok := c.State[update.Key.String()]
+			u, ok := c.state[update.Key.String()]
 			c.Lock.Unlock()
 
 			// See if we've got a matching update. For now, we just check
@@ -244,7 +254,7 @@ func (c cb) ExpectDeleted(kvps []model.KVPair) {
 		_ = wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 60*time.Second, true, func(ctx context.Context) (bool, error) {
 			// Get the update.
 			c.Lock.Lock()
-			update, ok := c.State[kvp.Key.String()]
+			update, ok := c.state[kvp.Key.String()]
 			exists = ok
 			c.Lock.Unlock()
 
@@ -298,14 +308,12 @@ poll:
 //
 // The returned function returns the cached entry or nil if the entry does not
 // exist in the cache.
-func (c cb) GetSyncerValueFunc(key model.Key) func() interface{} {
+func (c *cb) GetSyncerValueFunc(key model.Key) func() interface{} {
 	return func() interface{} {
 		log.Infof("Checking entry in cache: %v", key)
 		c.Lock.Lock()
-		defer func() {
-			c.Lock.Unlock()
-		}()
-		if entry, ok := c.State[key.String()]; ok {
+		defer c.Lock.Unlock()
+		if entry, ok := c.state[key.String()]; ok {
 			return entry.Value
 		}
 		return nil
@@ -319,12 +327,12 @@ func (c cb) GetSyncerValueFunc(key model.Key) func() interface{} {
 // the Value may itself by nil.
 //
 // The returned function returns true if the entry is present.
-func (c cb) GetSyncerValuePresentFunc(key model.Key) func() interface{} {
+func (c *cb) GetSyncerValuePresentFunc(key model.Key) func() interface{} {
 	return func() interface{} {
 		log.Infof("Checking entry in cache: %v", key)
 		c.Lock.Lock()
-		defer func() { c.Lock.Unlock() }()
-		_, ok := c.State[key.String()]
+		defer c.Lock.Unlock()
+		_, ok := c.state[key.String()]
 		return ok
 	}
 }
@@ -342,15 +350,15 @@ func CreateClientAndSyncer(cfg apiconfig.KubeConfig) (*KubeClient, *cb, api.Sync
 	Expect(err).NotTo(HaveOccurred(), "Failed to initialize the backend.")
 
 	// Start the syncer.
-	updateChan := make(chan api.Update)
-	callback := cb{
-		State:      map[string]api.Update{},
+	updateChan := make(chan any)
+	callback := &cb{
+		state:      map[string]api.Update{},
 		status:     api.WaitForDatastore,
 		Lock:       &sync.Mutex{},
 		updateChan: updateChan,
 	}
 	syncer := felixsyncer.New(c, caCfg, callback, true)
-	return c.(*KubeClient), &callback, syncer
+	return c.(*KubeClient), callback, syncer
 }
 
 var _ = testutils.E2eDatastoreDescribe("Test UIDs and owner references", testutils.DatastoreK8s, func(cfg apiconfig.CalicoAPIConfig) {
@@ -479,10 +487,13 @@ var _ = testutils.E2eDatastoreDescribe("Test Syncer API for Kubernetes backend",
 
 		// Start processing updates.
 		go cb.ProcessUpdates()
+
+		Eventually(cb.GetStatus, "5s", "50ms").Should(Equal(api.InSync))
 	})
 
 	AfterEach(func() {
 		// Clean up all Calico resources.
+		By("AfterEach")
 		err := c.Clean()
 		Expect(err).NotTo(HaveOccurred())
 
@@ -2544,13 +2555,13 @@ var _ = testutils.E2eDatastoreDescribe("Test Syncer API for Kubernetes backend",
 		By("Listing all BlockAffinity for all Nodes", func() {
 			objs, err := c.List(ctx, model.BlockAffinityListOptions{}, "")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(len(objs.KVPairs)).To(Equal(2))
+			Expect(objs.KVPairs).To(HaveLen(2))
 		})
 
 		By("Listing all BlockAffinity for a specific Node", func() {
 			objs, err := c.List(ctx, model.BlockAffinityListOptions{Host: nodename, AffinityType: string(ipam.AffinityTypeHost)}, "")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(len(objs.KVPairs)).To(Equal(1))
+			Expect(objs.KVPairs).To(HaveLen(1))
 		})
 	})
 
@@ -2913,9 +2924,10 @@ var _ = testutils.E2eDatastoreDescribe("Test Syncer API for Kubernetes backend",
 
 var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.DatastoreK8s, func(cfg apiconfig.CalicoAPIConfig) {
 	var (
-		c         *KubeClient
-		anpClient *adminpolicyclient.PolicyV1alpha1Client
-		ctx       context.Context
+		c          *KubeClient
+		anpClient  *adminpolicyclient.PolicyV1alpha1Client
+		kcnpClient *netpolicyclient.PolicyV1alpha2Client
+		ctx        context.Context
 	)
 
 	BeforeEach(func() {
@@ -2929,8 +2941,16 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 		config.ContentType = runtime.ContentTypeJSON
 		anpClient, err = buildK8SAdminPolicyClient(config)
 		Expect(err).NotTo(HaveOccurred())
+		kcnpClient, err = buildK8SCNPClient(config)
+		Expect(err).NotTo(HaveOccurred())
 
 		ctx = context.Background()
+	})
+
+	AfterEach(func() {
+		By("AfterEach")
+		err := c.Clean()
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	Describe("watching Profiles", func() {
@@ -3045,6 +3065,79 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 		})
 	})
 
+	Describe("watching ClusterNetworkPolicies", func() {
+		createTestClusterNetworkPolicy := func(name string, tier clusternetpolicy.Tier) {
+			cnp := &clusternetpolicy.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name,
+				},
+				Spec: clusternetpolicy.ClusterNetworkPolicySpec{
+					Tier:     tier,
+					Priority: 100,
+					Subject: clusternetpolicy.ClusterNetworkPolicySubject{
+						Namespaces: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"label": "value",
+							},
+						},
+					},
+				},
+			}
+			_, err := kcnpClient.ClusterNetworkPolicies().Create(ctx, cnp, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		deleteAllClusterNetworkPolicies := func() {
+			var zero int64
+			err := kcnpClient.ClusterNetworkPolicies().DeleteCollection(
+				ctx,
+				metav1.DeleteOptions{GracePeriodSeconds: &zero},
+				metav1.ListOptions{},
+			)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		BeforeEach(func() {
+			createTestClusterNetworkPolicy("test-cluster-net-policy-1", clusternetpolicy.AdminTier)
+			createTestClusterNetworkPolicy("test-cluster-net-policy-2", clusternetpolicy.BaselineTier)
+		})
+		AfterEach(func() {
+			deleteAllClusterNetworkPolicies()
+		})
+		It("supports watching all k8s cluster network policies", func() {
+			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, api.WatchOptions{Revision: ""})
+			Expect(err).NotTo(HaveOccurred())
+			defer watch.Stop()
+			ExpectAddedEvent(watch.ResultChan())
+		})
+		It("supports resuming watch from previous revision", func() {
+			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, api.WatchOptions{Revision: ""})
+			Expect(err).NotTo(HaveOccurred())
+			event := ExpectAddedEvent(watch.ResultChan())
+			watch.Stop()
+
+			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, api.WatchOptions{Revision: event.New.Revision})
+			Expect(err).NotTo(HaveOccurred())
+			watch.Stop()
+		})
+		It("should handle a list for many cluster network policies in Admin tier with a revision", func() {
+			for i := 3; i < 1000; i++ {
+				createTestClusterNetworkPolicy(fmt.Sprintf("test-cluster-net-policy-%d", i), clusternetpolicy.AdminTier)
+			}
+			kvs, err := c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, "")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, kvs.Revision)
+			Expect(err).NotTo(HaveOccurred())
+		})
+		It("should handle a list for many cluster network policies in Baseline tier with a revision", func() {
+			for i := 3; i < 1000; i++ {
+				createTestClusterNetworkPolicy(fmt.Sprintf("test-cluster-net-policy-%d", i), clusternetpolicy.BaselineTier)
+			}
+			kvs, err := c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, "")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, kvs.Revision)
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
 	Describe("watching NetworkPolicies (native)", func() {
 		createTestNetworkPolicy := func(name string) {
 			np := networkingv1.NetworkPolicy{
@@ -3147,7 +3240,36 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 		})
 	})
 
-	Describe("watching / listing network polices (k8s and Calico) and admin network policies", func() {
+	Describe("watching / listing network polices (k8s and Calico) and cluster network policies", func() {
+		createTestClusterNetworkPolicy := func(name string) {
+			cnp := &clusternetpolicy.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name,
+				},
+				Spec: clusternetpolicy.ClusterNetworkPolicySpec{
+					Tier:     clusternetpolicy.AdminTier,
+					Priority: 100,
+					Subject: clusternetpolicy.ClusterNetworkPolicySubject{
+						Namespaces: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"label": "value",
+							},
+						},
+					},
+				},
+			}
+			_, err := kcnpClient.ClusterNetworkPolicies().Create(ctx, cnp, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		deleteAllClusterNetworkPolicies := func() {
+			var zero int64
+			err := kcnpClient.ClusterNetworkPolicies().DeleteCollection(
+				ctx,
+				metav1.DeleteOptions{GracePeriodSeconds: &zero},
+				metav1.ListOptions{},
+			)
+			Expect(err).NotTo(HaveOccurred())
+		}
 		createTestAdminNetworkPolicy := func(name string) {
 			anp := &adminpolicy.AdminNetworkPolicy{
 				ObjectMeta: metav1.ObjectMeta{
@@ -3214,7 +3336,9 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 			Expect(err).NotTo(HaveOccurred())
 		}
 		BeforeEach(func() {
-			// Create 2x Calico NP and 2x k8s NP and 2x k8s ANP
+			// Create 2x Calico NP and 2x k8s NP, 2x k8s ANP and 2x k8s CNP
+			createTestClusterNetworkPolicy("test-cluster-net-policy-1")
+			createTestClusterNetworkPolicy("test-cluster-net-policy-2")
 			createTestAdminNetworkPolicy("test-admin-net-policy-1")
 			createTestAdminNetworkPolicy("test-admin-net-policy-2")
 			createCalicoNetworkPolicy("test-net-policy-1")
@@ -3227,6 +3351,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 			log.Info("[Test] Beginning Cleanup ----")
 			deleteAllNetworkPolicies()
 			deleteAllAdminNetworkPolicies()
+			deleteAllClusterNetworkPolicies()
 		})
 
 		It("supports resuming watch from previous revision (calico)", func() {
@@ -3421,6 +3546,72 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 			watch.Stop()
 		})
 
+		It("supports resuming watch from previous revision k8s cluster network policy", func() {
+			// Should only return k8s CNPs
+			l, err := c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(l.KVPairs).To(HaveLen(2))
+
+			// Now, modify all the policies.  It's important to do this with
+			// multiple policies of each type, because we want to test that revision
+			// numbers come out in a sensible order. We're going to resume the watch
+			// from the "last" event to come out of the watch, and if it doesn't
+			// really represent the latest update, when we resume watching, we
+			// will get duplicate events. Worse, if the "last" event from a watch
+			// doesn't represent the latest state, this implies some earlier
+			// event from the watch did, and if we happened to have stopped the
+			// watch at that point we would have missed some data!
+
+			// Modify the kubernetes policies
+			found := 0
+			for _, kvp := range l.KVPairs {
+				name := strings.TrimPrefix(kvp.Value.(*apiv3.GlobalNetworkPolicy).Name, "kcnp.kube-admin.")
+				p, err := kcnpClient.ClusterNetworkPolicies().Get(ctx, name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				p.SetLabels(map[string]string{"test": "00"})
+				_, err = kcnpClient.ClusterNetworkPolicies().Update(ctx, p, metav1.UpdateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				found++
+			}
+			Expect(found).To(Equal(2))
+
+			log.WithField("revision", l.Revision).Info("[TEST] first watch")
+			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, api.WatchOptions{Revision: l.Revision})
+			Expect(err).NotTo(HaveOccurred())
+
+			event := ExpectModifiedEvent(watch.ResultChan())
+			log.WithField("revision", event.New.Revision).Info("[TEST] first k8s event")
+			event = ExpectModifiedEvent(watch.ResultChan())
+			log.WithField("revision", event.New.Revision).Info("[TEST] second k8s event")
+
+			// There should be no more events
+			Expect(watch.ResultChan()).ToNot(Receive())
+			watch.Stop()
+
+			// Make a second change to one of the k8s CNPs
+			for _, kvp := range l.KVPairs {
+				name := strings.TrimPrefix(kvp.Value.(*apiv3.GlobalNetworkPolicy).Name, "kcnp.kube-admin.")
+				p, err := kcnpClient.ClusterNetworkPolicies().Get(ctx, name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				p.SetLabels(map[string]string{"test": "01"})
+				_, err = kcnpClient.ClusterNetworkPolicies().Update(ctx, p, metav1.UpdateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				break
+			}
+
+			// Resume watching at the revision of the event we got
+			log.WithField("revision", event.New.Revision).Info("second watch")
+			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, api.WatchOptions{Revision: event.New.Revision})
+			Expect(err).NotTo(HaveOccurred())
+
+			// We should only get 1 update, because the event from the previous watch should have been "latest"
+			ExpectModifiedEvent(watch.ResultChan())
+
+			// There should be no more events
+			Expect(watch.ResultChan()).ToNot(Receive())
+			watch.Stop()
+		})
+
 		It("supports watching from part way through a list (calico)", func() {
 			// Only 2 Calico NPs
 			l, err := c.List(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, "")
@@ -3468,6 +3659,28 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 		It("supports watching from part way through a list of Admin Network Policies", func() {
 			// Only 2 k8s ANPs
 			l, err := c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesAdminNetworkPolicy}, "")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(l.KVPairs).To(HaveLen(2))
+
+			// Watch from part way
+			for i := 0; i < 2; i++ {
+				revision := l.KVPairs[i].Revision
+				log.WithFields(log.Fields{
+					"revision": revision,
+					"key":      l.KVPairs[i].Key.String(),
+				}).Info("[Test] starting watch")
+				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindGlobalNetworkPolicy}, api.WatchOptions{Revision: revision})
+				Expect(err).ToNot(HaveOccurred())
+				// Since the items in the list aren't guaranteed to be in any specific order, we
+				// can't assert anything useful about what you should get out of this watch, so we
+				// just confirm that there is no error.
+				watch.Stop()
+			}
+		})
+
+		It("supports watching from part way through a list of Cluster Network Policies", func() {
+			// Only 2 k8s CNPs
+			l, err := c.List(ctx, model.ResourceListOptions{Kind: model.KindKubernetesClusterNetworkPolicy}, "")
 			Expect(err).ToNot(HaveOccurred())
 			Expect(l.KVPairs).To(HaveLen(2))
 

@@ -107,8 +107,8 @@ func newRouteManager(
 		routeProtocol:        calculateRouteProtocol(dpConfig),
 		opRecorder:           opRecorder,
 		logCtx: logrus.WithFields(logrus.Fields{
-			"ipVersion":     ipVersion,
-			"tunnel device": tunnelDevice,
+			"ipVersion":    ipVersion,
+			"tunnelDevice": tunnelDevice,
 		}),
 	}
 }
@@ -357,7 +357,7 @@ func (m *routeManager) updateRoutes() {
 			continue
 		}
 
-		if noEncapRoute := noEncapRoute(m.parentDevice, cidr, r, m.routeProtocol); noEncapRoute != nil {
+		if noEncapRoute := m.noEncapRoute(cidr, r); noEncapRoute != nil {
 			// We've got everything we need to program this route as a no-encap route.
 			noEncapRoutes = append(noEncapRoutes, *noEncapRoute)
 			logCtx.WithField("route", r).Debug("Destination in same subnet, using no-encap route.")
@@ -410,11 +410,11 @@ func blackholeRoutes(localIPAMBlocks map[string]*proto.RouteUpdate, proto netlin
 	return rtt
 }
 
-func noEncapRoute(ifaceName string, cidr ip.CIDR, r *proto.RouteUpdate, proto netlink.RouteProtocol) *routetable.Target {
-	if ifaceName == "" {
+func (m *routeManager) noEncapRoute(cidr ip.CIDR, r *proto.RouteUpdate) *routetable.Target {
+	if m.parentDevice == "" {
 		return nil
 	}
-	if !r.GetSameSubnet() {
+	if m.ippoolType != proto.IPPoolType_NO_ENCAP && !r.GetSameSubnet() {
 		return nil
 	}
 	if r.DstNodeIp == "" {
@@ -424,7 +424,7 @@ func noEncapRoute(ifaceName string, cidr ip.CIDR, r *proto.RouteUpdate, proto ne
 		Type:     routetable.TargetTypeNoEncap,
 		CIDR:     cidr,
 		GW:       ip.FromString(r.DstNodeIp),
-		Protocol: proto,
+		Protocol: m.routeProtocol,
 	}
 	return &noEncapRoute
 }
@@ -452,13 +452,14 @@ func (m *routeManager) detectParentIface() (netlink.Link, error) {
 			return nil, err
 		}
 		for _, addr := range addrs {
-			if addr.IPNet.IP.String() == parentAddr {
-				m.logCtx.Debugf("Found parent interface: %s", link)
+			// Match address with or without subnet mask
+			if addr.IP.String() == parentAddr || addr.IPNet.String() == parentAddr {
+				m.logCtx.Debugf("Found parent interface: %+v", link)
 				return link, nil
 			}
 		}
 	}
-	return nil, fmt.Errorf("Unable to find parent interface with address %s", parentAddr)
+	return nil, fmt.Errorf("unable to find parent interface with address %s", parentAddr)
 }
 
 // KeepDeviceInSync runs in a loop and checks that the device is still correctly configured, and updates it if necessary.
@@ -512,13 +513,15 @@ func (m *routeManager) keepDeviceInSync(
 			continue
 		}
 
-		m.logCtx.Debug("Configuring tunnel device")
-		err = m.configureTunnelDevice(link, addr, mtu, xsumBroken)
-		if err != nil {
-			m.logCtx.WithError(err).Warn("Failed to configure tunnel device, retrying...")
-			logNextSuccess = true
-			sleepMonitoringChans(1 * time.Second)
-			continue
+		if link != nil {
+			m.logCtx.Debug("Configuring tunnel device")
+			err = m.configureTunnelDevice(link, addr, mtu, xsumBroken)
+			if err != nil {
+				m.logCtx.WithError(err).Warn("Failed to configure tunnel device, retrying...")
+				logNextSuccess = true
+				sleepMonitoringChans(1 * time.Second)
+				continue
+			}
 		}
 
 		newParentIface := parentDevice.Attrs().Name

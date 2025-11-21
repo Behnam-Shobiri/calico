@@ -88,6 +88,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.Node":                     schema_libcalico_go_lib_apis_v3_Node(ref),
 		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeAddress":              schema_libcalico_go_lib_apis_v3_NodeAddress(ref),
 		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeBGPSpec":              schema_libcalico_go_lib_apis_v3_NodeBGPSpec(ref),
+		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeInterface":            schema_libcalico_go_lib_apis_v3_NodeInterface(ref),
 		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeList":                 schema_libcalico_go_lib_apis_v3_NodeList(ref),
 		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeSpec":                 schema_libcalico_go_lib_apis_v3_NodeSpec(ref),
 		"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeStatus":               schema_libcalico_go_lib_apis_v3_NodeStatus(ref),
@@ -2361,6 +2362,11 @@ func schema_libcalico_go_lib_apis_v3_IPAMBlockSpec(ref common.ReferenceCallback)
 							Format:      "",
 						},
 					},
+					"affinityClaimTime": {
+						SchemaProps: spec.SchemaProps{
+							Ref: ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
 					"allocations": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Array of allocations in-use within this block. nil entries mean the allocation is free. For non-nil entries at index i, the index is the ordinal of the allocation within this block and the value is the index of the associated attributes in the Attributes array.",
@@ -2449,7 +2455,7 @@ func schema_libcalico_go_lib_apis_v3_IPAMBlockSpec(ref common.ReferenceCallback)
 			},
 		},
 		Dependencies: []string{
-			"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.AllocationAttribute"},
+			"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.AllocationAttribute", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
@@ -2872,6 +2878,38 @@ func schema_libcalico_go_lib_apis_v3_NodeBGPSpec(ref common.ReferenceCallback) c
 	}
 }
 
+func schema_libcalico_go_lib_apis_v3_NodeInterface(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"addresses": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func schema_libcalico_go_lib_apis_v3_NodeList(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2996,11 +3034,25 @@ func schema_libcalico_go_lib_apis_v3_NodeSpec(ref common.ReferenceCallback) comm
 							},
 						},
 					},
+					"interfaces": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Interfaces is a list of interfaces on the node.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeInterface"),
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeAddress", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeBGPSpec", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeWireguardSpec", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.OrchRef"},
+			"github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeAddress", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeBGPSpec", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeInterface", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.NodeWireguardSpec", "github.com/projectcalico/calico/libcalico-go/lib/apis/v3.OrchRef"},
 	}
 }
 
@@ -3206,9 +3258,16 @@ func schema_libcalico_go_lib_apis_v3_QoSControls(ref common.ReferenceCallback) c
 							Format:      "int64",
 						},
 					},
+					"dscp": {
+						SchemaProps: spec.SchemaProps{
+							Ref: ref("github.com/projectcalico/api/pkg/lib/numorstring.DSCP"),
+						},
+					},
 				},
 			},
 		},
+		Dependencies: []string{
+			"github.com/projectcalico/api/pkg/lib/numorstring.DSCP"},
 	}
 }
 

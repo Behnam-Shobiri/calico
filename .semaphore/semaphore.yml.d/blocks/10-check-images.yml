@@ -1,0 +1,9 @@
+- name: Check images availability
+  run:
+    when: "${FORCE_RUN} or (branch !~ 'build-v.*' and change_in(['/charts/', '/manifests/'], {pipeline_file: 'ignore'}))"
+  dependencies: []
+  task:
+    jobs:
+      - name: Check images availability
+        commands:
+          - make check-images-availability

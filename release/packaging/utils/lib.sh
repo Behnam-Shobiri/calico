@@ -57,7 +57,7 @@ function git_version_to_deb {
     # but git_auto_version changes them to 'v3.31.0rc.post267'
     # For the Debian package version, translate that to v3.31.0~rc.post267,
     # because it's logically _before_ v3.31.0.
-    echo "${1/rc*/~&}"
+    echo $1 | sed 's/rc/~rc/'
 }
 
 function git_version_to_rpm {
@@ -134,6 +134,9 @@ function test_validate_version {
 # be set by the caller.
 ssh_host="gcloud --quiet compute ssh ${GCLOUD_ARGS} ${HOST}"
 scp_host="gcloud --quiet compute scp ${GCLOUD_ARGS}"
+
+upload_artifact="gcloud --quiet --no-user-output-enabled artifacts yum upload ${GCLOUD_REPO_NAME} --location=us-west1 --project=${GCLOUD_PROJECT:-tigera-wp-tcp-redirect}"
+check_artifact="gcloud artifacts files list --repository=${GCLOUD_REPO_NAME} --project=${GCLOUD_PROJECT:-tigera-wp-tcp-redirect} --location=us-west1 --format=json --quiet"
 rpmdir=/usr/share/nginx/html/rpm
 
 function ensure_repo_exists {
@@ -146,13 +149,60 @@ function copy_rpms_to_host {
     rootdir=$(git_repo_root)
     shopt -s nullglob
     for arch in src noarch x86_64; do
-	set -- $(find ${rootdir}/release/packaging/output/dist/rpms-el7 -name "*.$arch.rpm")
-	if test $# -gt 0; then
-	    $ssh_host -- mkdir -p $rpmdir/$reponame/$arch/
-	    $scp_host "$@" ${HOST}:$rpmdir/$reponame/$arch/
-	fi
+        set -- $(find ${rootdir}/release/packaging/output/dist/rpms-el7 -name "*.$arch.rpm")
+        if test $# -gt 0; then
+            $ssh_host -- mkdir -p $rpmdir/$reponame/$arch/
+            $scp_host "$@" ${HOST}:$rpmdir/$reponame/$arch/
+        fi
     done
 }
+
+function check_rpm_is_uploaded_to_artifact_registry {
+    rpmfile=$1
+    # Get the package name and version from the RPM file itself,
+    # to avoid having to parse filenames. Make sure we get the epoch
+    # and release, since those are included in the versions that artifact
+    # registry uses. Note that if the epoch is unset GAR treats it as a 0,
+    # so if %{EPOCH} is '(none)' we replace it with 0.
+    rpmfile_package_name=$(rpm -qp --queryformat "%{NAME}" "${rpmfile}")
+    rpmfile_package_version=$(rpm -qp --queryformat "%{EPOCH}:%{VERSION}-%{RELEASE}" "${rpmfile}" | sed -e 's/(none)/0/')
+
+    # Get the list of packages matching the name and version; if this is 0, then we
+    # have not uploaded this package+version combo yet. If it's anything else, we have.
+    matching_package_count=$(${check_artifact} --package="${rpmfile_package_name}" --version="${rpmfile_package_version}" | jq length)
+    if [[ $matching_package_count == 0 ]]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+function copy_rpms_to_artifact_registry {
+    reponame=$1
+    rootdir=$(git_repo_root)
+    upload_errors=""
+    shopt -s nullglob
+    echo "Uploading RPMs to Google Artifact Registry"
+    for rpmfile in $(find ${rootdir}/release/packaging/output/dist/rpms-el7 -name "*.rpm" -not -name "*.src.rpm" | sort); do
+        filename=$(basename ${rpmfile}) 
+        if check_rpm_is_uploaded_to_artifact_registry "${rpmfile}"; then
+            echo "  Skipping  ${filename} (already uploaded)"
+        else
+            echo "  Uploading ${filename}"
+            ${upload_artifact} --source="${rpmfile}" || upload_errors="${upload_errors} ${filename}"
+        fi
+    done
+
+    if [[ ${upload_errors} != "" ]]; then
+        echo >&2 "Uploading RPMs complete, but the following files failed to upload to artifact registry:"
+        for file in $upload_errors; do
+            echo >&2 "  ${file}"
+        done
+        exit 1
+    fi
+    echo "Uploading RPMs complete"
+}
+
 
 # Clean and update repository metadata.  This includes ensuring that
 # all RPMs are signed with the Project Calico Maintainers secret key,

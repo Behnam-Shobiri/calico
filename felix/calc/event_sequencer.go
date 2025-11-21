@@ -15,7 +15,6 @@
 package calc
 
 import (
-	"fmt"
 	"strings"
 
 	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
@@ -23,7 +22,7 @@ import (
 
 	"github.com/projectcalico/calico/felix/config"
 	"github.com/projectcalico/calico/felix/ip"
-	"github.com/projectcalico/calico/felix/labelindex"
+	"github.com/projectcalico/calico/felix/labelindex/ipsetmember"
 	"github.com/projectcalico/calico/felix/multidict"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/felix/types"
@@ -57,8 +56,8 @@ type EventSequencer struct {
 	// updates and generate updates in dependency order.
 	pendingAddedIPSets           map[string]proto.IPSetUpdate_IPSetType
 	pendingRemovedIPSets         set.Set[string]
-	pendingAddedIPSetMembers     multidict.Multidict[string, labelindex.IPSetMember]
-	pendingRemovedIPSetMembers   multidict.Multidict[string, labelindex.IPSetMember]
+	pendingAddedIPSetMembers     multidict.Multidict[string, ipsetmember.IPSetMember]
+	pendingRemovedIPSetMembers   multidict.Multidict[string, ipsetmember.IPSetMember]
 	pendingPolicyUpdates         map[model.PolicyKey]*ParsedRules
 	pendingPolicyDeletes         set.Set[model.PolicyKey]
 	pendingProfileUpdates        map[model.ProfileRulesKey]*ParsedRules
@@ -138,8 +137,8 @@ func NewEventSequencer(conf configInterface) *EventSequencer {
 		config:                     conf,
 		pendingAddedIPSets:         map[string]proto.IPSetUpdate_IPSetType{},
 		pendingRemovedIPSets:       set.New[string](),
-		pendingAddedIPSetMembers:   multidict.New[string, labelindex.IPSetMember](),
-		pendingRemovedIPSetMembers: multidict.New[string, labelindex.IPSetMember](),
+		pendingAddedIPSetMembers:   multidict.New[string, ipsetmember.IPSetMember](),
+		pendingRemovedIPSetMembers: multidict.New[string, ipsetmember.IPSetMember](),
 
 		pendingPolicyUpdates:         map[model.PolicyKey]*ParsedRules{},
 		pendingPolicyDeletes:         set.New[model.PolicyKey](),
@@ -221,7 +220,7 @@ func (buf *EventSequencer) OnIPSetRemoved(setID string) {
 	buf.pendingRemovedIPSetMembers.DiscardKey(setID)
 }
 
-func (buf *EventSequencer) OnIPSetMemberAdded(setID string, member labelindex.IPSetMember) {
+func (buf *EventSequencer) OnIPSetMemberAdded(setID string, member ipsetmember.IPSetMember) {
 	log.Debugf("IP set %v now contains %v", setID, member)
 	sent := buf.sentIPSets.Contains(setID)
 	_, updatePending := buf.pendingAddedIPSets[setID]
@@ -235,7 +234,7 @@ func (buf *EventSequencer) OnIPSetMemberAdded(setID string, member labelindex.IP
 	}
 }
 
-func (buf *EventSequencer) OnIPSetMemberRemoved(setID string, member labelindex.IPSetMember) {
+func (buf *EventSequencer) OnIPSetMemberRemoved(setID string, member ipsetmember.IPSetMember) {
 	log.Debugf("IP set %v no longer contains %v", setID, member)
 	sent := buf.sentIPSets.Contains(setID)
 	_, updatePending := buf.pendingAddedIPSets[setID]
@@ -308,6 +307,10 @@ func (buf *EventSequencer) flushPolicyUpdates() {
 }
 
 func ParsedRulesToActivePolicyUpdate(key model.PolicyKey, rules *ParsedRules) *proto.ActivePolicyUpdate {
+	var perfHints []string
+	for _, hint := range rules.PerformanceHints {
+		perfHints = append(perfHints, string(hint))
+	}
 	return &proto.ActivePolicyUpdate{
 		Id: &proto.PolicyID{
 			Tier: key.Tier,
@@ -326,6 +329,7 @@ func ParsedRulesToActivePolicyUpdate(key model.PolicyKey, rules *ParsedRules) *p
 			Untracked:        rules.Untracked,
 			PreDnat:          rules.PreDNAT,
 			OriginalSelector: rules.OriginalSelector,
+			PerfHints:        perfHints,
 		},
 	}
 }
@@ -401,7 +405,10 @@ func ModelWorkloadEndpointToProto(ep *model.WorkloadEndpoint, peerData *Endpoint
 	if ep.Mac != nil {
 		mac = ep.Mac.String()
 	}
-	var qosControls *proto.QoSControls
+	var (
+		qosControls *proto.QoSControls
+		qosPolicies []*proto.QoSPolicy
+	)
 	if ep.QoSControls != nil {
 		qosControls = &proto.QoSControls{
 			IngressBandwidth:      ep.QoSControls.IngressBandwidth,
@@ -419,6 +426,12 @@ func ModelWorkloadEndpointToProto(ep *model.WorkloadEndpoint, peerData *Endpoint
 			IngressMaxConnections: ep.QoSControls.IngressMaxConnections,
 			EgressMaxConnections:  ep.QoSControls.EgressMaxConnections,
 		}
+
+		if ep.QoSControls.DSCP != nil {
+			qosPolicies = append(qosPolicies, &proto.QoSPolicy{
+				Dscp: int32(ep.QoSControls.DSCP.ToUint8()),
+			})
+		}
 	}
 
 	var localBGPPeer *proto.LocalBGPPeer
@@ -428,9 +441,16 @@ func ModelWorkloadEndpointToProto(ep *model.WorkloadEndpoint, peerData *Endpoint
 		}
 	}
 
-	epType := proto.WorkloadType_REGULAR
-	if isVMWorkload(ep.Labels) {
-		epType = proto.WorkloadType_VM
+	var skipRedir *proto.WorkloadBpfSkipRedir
+	// BPF ingress redirect should be skipped for VM workloads and workloads that have ingress BW QoS configured
+	if isVMWorkload(ep.Labels) || (ep.QoSControls != nil && (ep.QoSControls.IngressBandwidth > 0 || ep.QoSControls.IngressPacketRate > 0)) {
+		skipRedir = &proto.WorkloadBpfSkipRedir{Ingress: true}
+	}
+	if ep.QoSControls != nil && (ep.QoSControls.EgressBandwidth > 0 || ep.QoSControls.EgressPacketRate > 0) {
+		if skipRedir == nil {
+			skipRedir = &proto.WorkloadBpfSkipRedir{}
+		}
+		skipRedir.Egress = true
 	}
 
 	return &proto.WorkloadEndpoint{
@@ -447,11 +467,18 @@ func ModelWorkloadEndpointToProto(ep *model.WorkloadEndpoint, peerData *Endpoint
 		Annotations:                ep.Annotations,
 		QosControls:                qosControls,
 		LocalBgpPeer:               localBGPPeer,
-		Type:                       epType,
+		SkipRedir:                  skipRedir,
+		QosPolicies:                qosPolicies,
 	}
 }
 
 func ModelHostEndpointToProto(ep *model.HostEndpoint, tiers, untrackedTiers, preDNATTiers []*proto.TierInfo, forwardTiers []*proto.TierInfo) *proto.HostEndpoint {
+	var qosPolicies []*proto.QoSPolicy
+	if ep.QoSControls != nil && ep.QoSControls.DSCP != nil {
+		qosPolicies = append(qosPolicies, &proto.QoSPolicy{
+			Dscp: int32(ep.QoSControls.DSCP.ToUint8()),
+		})
+	}
 	return &proto.HostEndpoint{
 		Name:              ep.Name,
 		ExpectedIpv4Addrs: ipsToStrings(ep.ExpectedIPv4Addrs),
@@ -461,6 +488,7 @@ func ModelHostEndpointToProto(ep *model.HostEndpoint, tiers, untrackedTiers, pre
 		UntrackedTiers:    untrackedTiers,
 		PreDnatTiers:      preDNATTiers,
 		ForwardTiers:      forwardTiers,
+		QosPolicies:       qosPolicies,
 	}
 }
 
@@ -576,7 +604,7 @@ func (buf *EventSequencer) flushHostIPUpdates() {
 	for hostname, hostIP := range buf.pendingHostIPUpdates {
 		hostAddr := ""
 		if hostIP != nil {
-			hostAddr = hostIP.IP.String()
+			hostAddr = hostIP.String()
 		}
 		buf.Callback(&proto.HostMetadataUpdate{
 			Hostname: hostname,
@@ -618,7 +646,7 @@ func (buf *EventSequencer) flushHostIPv6Updates() {
 	for hostname, hostIP := range buf.pendingHostIPv6Updates {
 		hostIPv6Addr := ""
 		if hostIP != nil {
-			hostIPv6Addr = hostIP.IP.String()
+			hostIPv6Addr = hostIP.String()
 		}
 		buf.Callback(&proto.HostMetadataV6Update{
 			Hostname: hostname,
@@ -818,8 +846,8 @@ func (buf *EventSequencer) flushAddedIPSets() {
 	for setID, setType := range buf.pendingAddedIPSets {
 		log.WithField("setID", setID).Debug("Flushing added IP set")
 		members := make([]string, 0)
-		buf.pendingAddedIPSetMembers.Iter(setID, func(member labelindex.IPSetMember) {
-			members = append(members, memberToProto(member))
+		buf.pendingAddedIPSetMembers.Iter(setID, func(member ipsetmember.IPSetMember) {
+			members = append(members, member.ToProtobufFormat())
 		})
 		buf.pendingAddedIPSetMembers.DiscardKey(setID)
 		buf.Callback(&proto.IPSetUpdate{
@@ -830,21 +858,6 @@ func (buf *EventSequencer) flushAddedIPSets() {
 		buf.sentIPSets.Add(setID)
 		delete(buf.pendingAddedIPSets, setID)
 	}
-}
-
-func memberToProto(member labelindex.IPSetMember) string {
-	switch member.Protocol {
-	case labelindex.ProtocolNone:
-		return member.CIDR.String()
-	case labelindex.ProtocolTCP:
-		return fmt.Sprintf("%s,tcp:%d", member.CIDR.Addr(), member.PortNumber)
-	case labelindex.ProtocolUDP:
-		return fmt.Sprintf("%s,udp:%d", member.CIDR.Addr(), member.PortNumber)
-	case labelindex.ProtocolSCTP:
-		return fmt.Sprintf("%s,sctp:%d", member.CIDR.Addr(), member.PortNumber)
-	}
-	log.WithField("member", member).Panic("Unknown IP set member type")
-	return ""
 }
 
 func (buf *EventSequencer) Flush() {
@@ -928,11 +941,11 @@ func (buf *EventSequencer) flushAddsOrRemoves(setID string) {
 	deltaUpdate := proto.IPSetDeltaUpdate{
 		Id: setID,
 	}
-	buf.pendingAddedIPSetMembers.Iter(setID, func(member labelindex.IPSetMember) {
-		deltaUpdate.AddedMembers = append(deltaUpdate.AddedMembers, memberToProto(member))
+	buf.pendingAddedIPSetMembers.Iter(setID, func(member ipsetmember.IPSetMember) {
+		deltaUpdate.AddedMembers = append(deltaUpdate.AddedMembers, member.ToProtobufFormat())
 	})
-	buf.pendingRemovedIPSetMembers.Iter(setID, func(member labelindex.IPSetMember) {
-		deltaUpdate.RemovedMembers = append(deltaUpdate.RemovedMembers, memberToProto(member))
+	buf.pendingRemovedIPSetMembers.Iter(setID, func(member ipsetmember.IPSetMember) {
+		deltaUpdate.RemovedMembers = append(deltaUpdate.RemovedMembers, member.ToProtobufFormat())
 	})
 	buf.pendingAddedIPSetMembers.DiscardKey(setID)
 	buf.pendingRemovedIPSetMembers.DiscardKey(setID)

@@ -13,9 +13,10 @@
 #include <linux/icmp.h>
 #endif
 
-#include "types.h"
-#include "skb.h"
+#include "counters.h"
 #include "routes.h"
+#include "skb.h"
+#include "types.h"
 
 #define PARSING_OK 0
 #define PARSING_OK_V6 1
@@ -173,6 +174,28 @@ static CALI_BPF_INLINE int tc_state_fill_from_nexthdr(struct cali_tc_ctx *ctx, b
 					/* Unlike IPIP, the user can be using VXLAN on a different VNI
 					 * so we don't simply drop it. */
 					CALI_DEBUG("VXLAN packet to unknown dest, fall through to policy.");
+				}
+			}
+		}
+		if (ctx->state->dport == WG_PORT) {
+			/* Wireguard packet. Allow if to/from known Calico host. */
+			if (CALI_F_FROM_HEP) {
+				if (rt_addr_is_remote_host(&ctx->state->ip_src)) {
+					CALI_DEBUG("Wireguard packet from known Calico host, allow.");
+					goto allow;
+				} else {
+					CALI_DEBUG("Wireguard packet from unknown source, drop.");
+					deny_reason(ctx, CALI_REASON_UNAUTH_SOURCE);
+					goto deny;
+				}
+			} else if (CALI_F_TO_HEP && !CALI_F_L3_DEV) {
+				if (rt_addr_is_remote_host(&ctx->state->ip_dst)) {
+					CALI_DEBUG("Wireguard packet to known Calico host, allow.");
+					goto allow;
+				} else {
+					CALI_DEBUG("Wireguard packet to unknown dest, drop.");
+					deny_reason(ctx, CALI_REASON_UNAUTH_SOURCE);
+					goto deny;
 				}
 			}
 		}

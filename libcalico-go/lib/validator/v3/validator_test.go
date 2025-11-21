@@ -45,8 +45,8 @@ func init() {
 	var V100000000 = 0x100000000
 	var tierOrder = float64(100.0)
 	var defaultTierOrder = api.DefaultTierOrder
-	var anpTierOrder = api.AdminNetworkPolicyTierOrder
-	var banpTierOrder = api.BaselineAdminNetworkPolicyTierOrder
+	var adminTierOrder = api.KubeAdminTierOrder
+	var baselineTierOrder = api.KubeBaselineTierOrder
 	var defaultTierBadOrder = float64(10.0)
 
 	// We need pointers to bools, so define the values here.
@@ -1132,6 +1132,119 @@ func init() {
 					NodeSelector: "!all()",
 				},
 			}, false),
+		Entry("should reject IP pool with Tunnel allowedUse and namespaceSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR: netv4_4,
+					AllowedUses: []api.IPPoolAllowedUse{
+						api.IPPoolAllowedUseTunnel,
+					},
+					NamespaceSelector: `region == "east"`,
+				},
+			}, false),
+		Entry("should reject IP pool with Tunnel and Workload allowedUses and namespaceSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR: netv4_4,
+					AllowedUses: []api.IPPoolAllowedUse{
+						api.IPPoolAllowedUseWorkload,
+						api.IPPoolAllowedUseTunnel,
+					},
+					NamespaceSelector: `region == "east"`,
+				},
+			}, false),
+		Entry("should accept IP pool with Tunnel allowedUse and no namespaceSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR: netv4_4,
+					AllowedUses: []api.IPPoolAllowedUse{
+						api.IPPoolAllowedUseTunnel,
+					},
+				},
+			}, true),
+		Entry("should reject IP pool with invalid nodeSelector (global)",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:         netv4_4,
+					NodeSelector: "global()",
+				},
+			}, false),
+		Entry("should accept IP pool with valid nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:         netv4_4,
+					NodeSelector: `region == "east"`,
+				},
+			}, true),
+		Entry("should accept IP pool with complex nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:         netv4_4,
+					NodeSelector: `region == "east" && environment == "production"`,
+				},
+			}, true),
+		Entry("should accept IP pool with set-based nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:         netv4_4,
+					NodeSelector: `region in {"east", "west"}`,
+				},
+			}, true),
+		Entry("should accept IP pool with existence check nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:         netv4_4,
+					NodeSelector: `has(team)`,
+				},
+			}, true),
+		Entry("should accept IP pool with all() nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:         netv4_4,
+					NodeSelector: "all()",
+				},
+			}, true),
+		Entry("should reject IP pool with invalid namespaceSelector (global)",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:              netv4_4,
+					NamespaceSelector: "global()",
+				},
+			}, false),
+		Entry("should accept IP pool with valid namespaceSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:              netv4_4,
+					NamespaceSelector: `region == "east"`,
+				},
+			}, true),
+		Entry("should accept IP pool with complex namespaceSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:              netv4_4,
+					NamespaceSelector: `team == "backend" || team == "frontend"`,
+				},
+			}, true),
+		Entry("should accept IP pool with substring namespaceSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{Name: "pool.name"},
+				Spec: api.IPPoolSpec{
+					CIDR:              netv4_4,
+					NamespaceSelector: `environment contains "prod"`,
+				},
+			}, true),
 		// (API) IPReservation
 		Entry("should accept IPReservation with an IP",
 			api.IPReservation{
@@ -2595,7 +2708,7 @@ func init() {
 		Entry("Tier: allow adminnetworkpolicy tier with the predefined order", &api.Tier{
 			ObjectMeta: v1.ObjectMeta{Name: names.AdminNetworkPolicyTierName},
 			Spec: api.TierSpec{
-				Order: &anpTierOrder,
+				Order: &adminTierOrder,
 			}}, true),
 		Entry("Tier: disallow baselineadminnetworkpolicy tier with an invalid order", &api.Tier{
 			ObjectMeta: v1.ObjectMeta{Name: names.BaselineAdminNetworkPolicyTierName},
@@ -2605,7 +2718,27 @@ func init() {
 		Entry("Tier: allow baselineadminnetworkpolicy tier with the predefined order", &api.Tier{
 			ObjectMeta: v1.ObjectMeta{Name: names.BaselineAdminNetworkPolicyTierName},
 			Spec: api.TierSpec{
-				Order: &banpTierOrder,
+				Order: &baselineTierOrder,
+			}}, true),
+		Entry("Tier: disallow kube-admin tier with an invalid order", &api.Tier{
+			ObjectMeta: v1.ObjectMeta{Name: names.KubeAdminTierName},
+			Spec: api.TierSpec{
+				Order: &defaultTierBadOrder,
+			}}, false),
+		Entry("Tier: allow kube-admin tier with the predefined order", &api.Tier{
+			ObjectMeta: v1.ObjectMeta{Name: names.KubeAdminTierName},
+			Spec: api.TierSpec{
+				Order: &adminTierOrder,
+			}}, true),
+		Entry("Tier: disallow kube-baseline tier with an invalid order", &api.Tier{
+			ObjectMeta: v1.ObjectMeta{Name: names.KubeBaselineTierName},
+			Spec: api.TierSpec{
+				Order: &defaultTierBadOrder,
+			}}, false),
+		Entry("Tier: allow kube-baseline tier with the predefined order", &api.Tier{
+			ObjectMeta: v1.ObjectMeta{Name: names.KubeBaselineTierName},
+			Spec: api.TierSpec{
+				Order: &baselineTierOrder,
 			}}, true),
 		Entry("Tier: allow a tier with a valid order", &api.Tier{
 			ObjectMeta: v1.ObjectMeta{Name: "platform"},
@@ -3602,6 +3735,52 @@ func init() {
 		Entry("should accept a valid BPFForceTrackPacketsFromIfaces value 'docker+'", api.FelixConfigurationSpec{BPFForceTrackPacketsFromIfaces: &[]string{"docker+"}}, true),
 		Entry("should accept a valid BPFForceTrackPacketsFromIfaces value 'docker0,docker1'", api.FelixConfigurationSpec{BPFForceTrackPacketsFromIfaces: &[]string{"docker0", "docker1"}}, true),
 		Entry("should reject invalid BPFForceTrackPacketsFromIfaces value 'cali-123,cali@456'", api.FelixConfigurationSpec{BPFForceTrackPacketsFromIfaces: &[]string{"cali-123", "cali@456"}}, false),
+
+		Entry("disallow a NotNets catch-all IPv4 CIDR match",
+			&api.NetworkPolicy{
+				ObjectMeta: v1.ObjectMeta{Name: "thing"},
+				Spec: api.NetworkPolicySpec{
+					Ingress: []api.Rule{
+						{
+							Action: "Allow",
+							Destination: api.EntityRule{
+								NotNets: []string{"0.0.0.0/0"},
+							},
+						},
+					},
+				},
+			}, false,
+		),
+		Entry("disallow a NotNets catch-all IPv6 CIDR match",
+			&api.NetworkPolicy{
+				ObjectMeta: v1.ObjectMeta{Name: "thing"},
+				Spec: api.NetworkPolicySpec{
+					Ingress: []api.Rule{
+						{
+							Action: "Allow",
+							Source: api.EntityRule{
+								NotNets: []string{"::0/0"},
+							},
+						},
+					},
+				},
+			}, false,
+		),
+		Entry("disallow a NotNets catch-all IPv6 CIDR match - non-standard representation",
+			&api.NetworkPolicy{
+				ObjectMeta: v1.ObjectMeta{Name: "thing"},
+				Spec: api.NetworkPolicySpec{
+					Ingress: []api.Rule{
+						{
+							Action: "Allow",
+							Source: api.EntityRule{
+								NotNets: []string{"0:0:0::/0"},
+							},
+						},
+					},
+				},
+			}, false,
+		),
 	)
 }
 

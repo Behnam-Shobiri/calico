@@ -5,6 +5,8 @@
 #ifndef __CALI_BPF_JUMP_H__
 #define __CALI_BPF_JUMP_H__
 
+#include "types.h"
+
 CALI_MAP(cali_state, 4,
 		BPF_MAP_TYPE_PERCPU_ARRAY,
 		__u32, struct cali_tc_state,
@@ -69,6 +71,7 @@ enum cali_jump_index {
 	PROG_INDEX_ICMP_INNER_NAT,
 	PROG_INDEX_NEW_FLOW,
 	PROG_INDEX_IP_FRAG,
+	PROG_INDEX_MAGLEV,
 
 	PROG_INDEX_MAIN_DEBUG,
 	PROG_INDEX_POLICY_DEBUG,
@@ -79,6 +82,7 @@ enum cali_jump_index {
 	PROG_INDEX_ICMP_INNER_NAT_DEBUG,
 	PROG_INDEX_NEW_FLOW_DEBUG,
 	PROG_INDEX_IP_FRAG_DEBUG,
+	PROG_INDEX_MAGLEV_DEBUG,
 };
 
 #if CALI_F_XDP

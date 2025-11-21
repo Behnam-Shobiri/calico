@@ -18,6 +18,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,7 +29,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo"
+
+	//nolint:staticcheck // Ignore ST1001: should not use dot imports
 	. "github.com/onsi/gomega"
 	api "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	"github.com/sirupsen/logrus"
@@ -74,6 +78,10 @@ type Felix struct {
 	// get assigned to the IPv6 Wireguard tunnel.  Filled in by SetExpectedWireguardV6TunnelAddr().
 	ExpectedWireguardV6TunnelAddr string
 
+	// PanicExpected If set to true by the test, disables some diags collection
+	// on Stop()
+	PanicExpected bool
+
 	// IP of the Typha that this Felix is using (if any).
 	TyphaIP string
 
@@ -88,6 +96,8 @@ type Felix struct {
 
 	uniqueName string
 	flowServer *local.FlowServer
+
+	infra DatastoreInfra
 }
 
 type workload interface {
@@ -142,6 +152,8 @@ func RunFelix(infra DatastoreInfra, id int, options TopologyOptions) *Felix {
 		// Tell the wrapper to set the core file name pattern so we can find the dump.
 		"SET_CORE_PATTERN": "true",
 
+		"FELIX_HEALTHENABLED":            "true",
+		"FELIX_HEALTHHOST":               "0.0.0.0",
 		"FELIX_LOGSEVERITYSCREEN":        options.FelixLogSeverity,
 		"FELIX_LogDebugFilenameRegex":    options.FelixDebugFilenameRegex,
 		"FELIX_PROMETHEUSMETRICSENABLED": "true",
@@ -226,6 +238,11 @@ func RunFelix(infra DatastoreInfra, id int, options TopologyOptions) *Felix {
 		envVars["FELIX_NFTABLESMODE"] = "Enabled"
 	}
 
+	if strings.ToLower(os.Getenv("FELIX_FV_BPFATTACHTYPE")) == "tc" {
+		logrus.Info("Enabling TC with env var")
+		envVars["FELIX_BPFATTACHTYPE"] = "tc"
+	}
+
 	if options.DelayFelixStart {
 		envVars["DELAY_FELIX_START"] = "true"
 	}
@@ -300,18 +317,29 @@ func RunFelix(infra DatastoreInfra, id int, options TopologyOptions) *Felix {
 			"-P", "FORWARD", "DROP")
 	}
 
-	return &Felix{
+	f := &Felix{
 		Container:       c,
 		startupDelayed:  options.DelayFelixStart,
 		uniqueName:      uniqueName,
 		TopologyOptions: options,
 		flowServer:      flowServer,
+		infra:           infra,
 	}
+	// Register this Felix for teardown and diagnostics via infra.
+	infra.AddCleanup(f.Stop)
+	infra.RegisterFelix(f)
+	return f
 }
 
 func (f *Felix) Stop() {
 	if f == nil {
 		return
+	}
+	if BPFMode() && !f.PanicExpected {
+		err := f.ExecMayFail("calico-bpf", "connect-time", "clean")
+		if err != nil {
+			logrus.WithError(err).Warn("Failed to clean up BPF connect-time state")
+		}
 	}
 	if CreateCgroupV2 {
 		_ = f.ExecMayFail("rmdir", path.Join("/run/calico/cgroup/", f.Name))
@@ -319,7 +347,7 @@ func (f *Felix) Stop() {
 	f.FlowServerStop()
 	f.Container.Stop()
 
-	if CurrentGinkgoTestDescription().Failed {
+	if ginkgo.CurrentGinkgoTestDescription().Failed {
 		Expect(f.DataRaces()).To(BeEmpty(), "Test FAILED and data races were detected in the logs at teardown.")
 	} else {
 		Expect(f.DataRaces()).To(BeEmpty(), "Test PASSED but data races were detected in the logs at teardown.")
@@ -331,6 +359,7 @@ func (f *Felix) Restart() {
 	f.Exec("kill", "-HUP", fmt.Sprint(oldPID))
 	Eventually(f.GetFelixPID, "10s", "100ms").ShouldNot(Equal(oldPID))
 	f.FlowServerReset()
+	f.WaitForReady()
 }
 
 func (f *Felix) RestartWithDelayedStartup() func() {
@@ -345,7 +374,7 @@ func (f *Felix) RestartWithDelayedStartup() func() {
 	triggerChan := make(chan struct{})
 
 	go func() {
-		defer GinkgoRecover()
+		defer ginkgo.GinkgoRecover()
 		select {
 		case <-time.After(time.Second * 30):
 			logrus.Panic("Restart with delayed startup timed out after 30s")
@@ -381,9 +410,66 @@ func (f *Felix) SetEnv(env map[string]string) {
 	Expect(err).NotTo(HaveOccurred())
 }
 
+func (f *Felix) Ready() (bool, error) {
+	var healthAddr string
+
+	// Some tests override the health host, guess the right address to use.
+	switch f.TopologyOptions.ExtraEnvVars["FELIX_HEALTHHOST"] {
+	case "::":
+		healthAddr = f.GetIPv6()
+	case "", "0.0.0.0":
+		healthAddr = f.GetIP()
+	default:
+		healthAddr = f.TopologyOptions.ExtraEnvVars["FELIX_HEALTHHOST"]
+	}
+
+	url := "http://" + healthAddr + ":9099/readiness"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		logrus.WithError(err).Error("Forming HTTP request for readiness failed")
+		return false, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logrus.WithError(err).Warn("HTTP GET for readiness failed")
+		return false, err
+	}
+	ok := resp.StatusCode == http.StatusOK
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logrus.WithError(err).Warn("Failed to read response body")
+		return false, err
+	}
+	_ = resp.Body.Close()
+	if !ok {
+		return false, fmt.Errorf("felix is not ready: %s", string(body))
+	}
+	return ok, nil
+}
+
+func (f *Felix) WaitForReady() {
+	logrus.WithField("felix", f.Name).Info("Waiting for felix to be ready")
+	startTime := time.Now()
+	timeout := "10s"
+	if BPFMode() {
+		// BPF mode has to load BPF programs at startup, this can take a while
+		// when starting several felix nodes in parallel.
+		timeout = "30s"
+	}
+	EventuallyWithOffset(1, f.Ready, timeout, "100ms").Should(BeTrue(),
+		"Timed out waiting for Felix to become ready.")
+	logrus.WithField("felix", f.Name).Infof("Felix is ready after %s", time.Since(startTime))
+}
+
+func BPFMode() bool {
+	return os.Getenv("FELIX_FV_ENABLE_BPF") == "true"
+}
+
 // AttachTCPDump returns tcpdump attached to the container
 func (f *Felix) AttachTCPDump(iface string) *tcpdump.TCPDump {
-	return tcpdump.Attach(f.Container.Name, "", iface)
+	return tcpdump.Attach(f.Name, "", iface)
 }
 
 func (f *Felix) ProgramIptablesDNAT(serviceIP, targetIP, chain string, ipv6 bool) {
@@ -427,6 +513,10 @@ func (f *Felix) FlowServerReset() {
 	if f.flowServer != nil {
 		f.flowServer.Flush()
 	}
+}
+
+func (f *Felix) AddCleanup(fn func()) {
+	f.infra.AddCleanup(fn)
 }
 
 func (f *Felix) FlowServerAddress() string {
@@ -617,7 +707,7 @@ func (f *Felix) BPFNumPolProgramsByEntryPoint(entryPointIdx int) (contiguous, to
 		if err != nil {
 			gapSeen = true
 		}
-		if strings.Contains(out, "value:") {
+		if strings.Contains(out, `value:`) || strings.Contains(out, `"value":`) {
 			total++
 			if !gapSeen {
 				contiguous++

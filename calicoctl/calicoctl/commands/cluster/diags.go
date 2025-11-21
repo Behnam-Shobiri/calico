@@ -106,7 +106,7 @@ func diagsTestable(args []string, print func(a ...any) (int, error), continuatio
 	parser := &docopt.Parser{HelpHandler: docopt.NoHelpHandler, SkipHelpFlags: true}
 	parsedArgs, err := parser.ParseArgs(doc, args, "")
 	if err != nil {
-		return fmt.Errorf("Invalid option: 'calicoctl %s'.\n\n%v", strings.Join(args, " "), usage)
+		return fmt.Errorf("invalid option: 'calicoctl %s'.\n\n%v", strings.Join(args, " "), usage)
 	}
 
 	var opts diagOpts
@@ -180,7 +180,6 @@ func collectDiags(opts *diagOpts) error {
 }
 
 func collectSelectedNodeLogs(kubeClient kubernetes.Interface, dir, linkDir string, opts *diagOpts) {
-
 	// If --focus-nodes is specified, put those node names at the start of the node list.
 	nodeList := strings.Split(opts.FocusNodes, ",")
 
@@ -211,7 +210,7 @@ func collectSelectedNodeLogs(kubeClient kubernetes.Interface, dir, linkDir strin
 		return
 	}
 	for _, ns := range nsl.Items {
-		if !(strings.Contains(ns.Name, "calico") || strings.Contains(ns.Name, "tigera")) {
+		if !strings.Contains(ns.Name, "calico") && !strings.Contains(ns.Name, "tigera") {
 			continue
 		}
 
@@ -253,7 +252,6 @@ func collectSelectedNodeLogs(kubeClient kubernetes.Interface, dir, linkDir strin
 }
 
 func collectDiagsForSelectedPods(dir, linkDir string, opts *diagOpts, kubeClient kubernetes.Interface, nodeList []string, ns string, selector *v1.LabelSelector) {
-
 	labelMap, err := v1.LabelSelectorAsMap(selector)
 	if err != nil {
 		fmt.Printf("ERROR forming pod selector: %v\n", err)
@@ -442,6 +440,30 @@ func collectKubernetesResource(dir string) {
 		Info:     "Collect k8s baselineadminnetworkpolicies (text)",
 		CmdStr:   "kubectl get baselineadminnetworkpolicies.policy.networking.k8s.io -Ao wide",
 		FilePath: fmt.Sprintf("%s/baselineadminnetworkpolicies.txt", dir),
+	}, common.Cmd{
+		Info:     "Collect k8s validatingwebhookconfigurations (text)",
+		CmdStr:   "kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io -o wide",
+		FilePath: fmt.Sprintf("%s/validatingwebhookconfigurations.txt", dir),
+	}, common.Cmd{
+		Info:     "Collect k8s validatingwebhookconfigurations (yaml)",
+		CmdStr:   "kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io -o yaml",
+		FilePath: fmt.Sprintf("%s/validatingwebhookconfigurations.yaml", dir),
+	}, common.Cmd{
+		Info:     "Collect k8s mutatingwebhookconfigurations (text)",
+		CmdStr:   "kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io -o wide",
+		FilePath: fmt.Sprintf("%s/mutatingwebhookconfigurations.txt", dir),
+	}, common.Cmd{
+		Info:     "Collect k8s mutatingwebhookconfigurations (yaml)",
+		CmdStr:   "kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io -o yaml",
+		FilePath: fmt.Sprintf("%s/mutatingwebhookconfigurations.yaml", dir),
+	}, common.Cmd{
+		Info:     "Collect k8s apiservices (text)",
+		CmdStr:   "kubectl get apiservices.apiregistration.k8s.io -o wide",
+		FilePath: fmt.Sprintf("%s/apiservices.txt", dir),
+	}, common.Cmd{
+		Info:     "Collect k8s apiservices (yaml)",
+		CmdStr:   "kubectl get apiservices.apiregistration.k8s.io -o yaml",
+		FilePath: fmt.Sprintf("%s/apiservices.yaml", dir),
 	})
 	common.ExecAllCmdsWriteToFile(commands)
 }
@@ -477,7 +499,7 @@ type tls struct {
 func collectTLSSecrets(kubeClient kubernetes.Interface, dir string) {
 	fmt.Println("Collecting (censored) TLS secrets")
 	ctx := context.Background()
-	err := os.MkdirAll(dir, 0777)
+	err := os.MkdirAll(dir, 0o777)
 	if err != nil {
 		fmt.Printf("failed to create TLS directory: %v\n", err)
 		return
@@ -486,7 +508,7 @@ func collectTLSSecrets(kubeClient kubernetes.Interface, dir string) {
 		{"calico-kube-controllers-metrics-tls", "calico-system"},
 		{"calico-node-prometheus-server-tls", "calico-system"},
 		{"node-certs", "calico-system"},
-		{"typa-certs", "calico-system"},
+		{"typha-certs", "calico-system"},
 		{"calico-node-prometheus-client-tls", "tigera-prometheus"},
 		{"calico-node-prometheus-tls", "tigera-prometheus"},
 		{"deep-packet-inspection-tls", "tigera-dpi"},
@@ -507,6 +529,7 @@ func collectTLSSecrets(kubeClient kubernetes.Interface, dir string) {
 		{"tigera-compliance-reporter-tls", "tigera-compliance"},
 		{"tigera-compliance-server-tls ", "tigera-compliance"},
 		{"tigera-compliance-snapshotter-tls ", "tigera-compliance"},
+		{"tigera-dex-tls ", "tigera-dex"},
 	} {
 		for _, ns := range []string{t.ns, "tigera-operator"} {
 			fmt.Printf("Collecting secret %s/%s (censoring sensitive data) \n", t.ns, t.name)
@@ -517,7 +540,7 @@ func collectTLSSecrets(kubeClient kubernetes.Interface, dir string) {
 				censorSecret(secret)
 				yamlData, err := yaml.Marshal(secret)
 				if err == nil {
-					err = os.WriteFile(fmt.Sprintf("%s/%s_%s.yaml", dir, ns, t.name), yamlData, 0644)
+					err = os.WriteFile(fmt.Sprintf("%s/%s_%s.yaml", dir, ns, t.name), yamlData, 0o644)
 					if err != nil {
 						fmt.Printf("failed to write YAML to file: %v\n", err)
 					}
@@ -636,6 +659,11 @@ func collectCalicoNodeDiags(curNodeDir string, nodeName, namespace, podName stri
 			Info:     fmt.Sprintf("Collect ipset list for node %s", nodeName),
 			CmdStr:   fmt.Sprintf("kubectl exec -n %s -t %s -c calico-node -- ipset list", namespace, podName),
 			FilePath: fmt.Sprintf("%s/ipset-list.txt", curNodeDir),
+		},
+		{
+			Info:     fmt.Sprintf("Collect conntrack stats for node %s", nodeName),
+			CmdStr:   fmt.Sprintf("kubectl exec -n %s -t %s -c calico-node -- conntrack -LSC", namespace, podName),
+			FilePath: fmt.Sprintf("%s/conntrack-list.txt", curNodeDir),
 		},
 		// eBPF diagnostics
 		{

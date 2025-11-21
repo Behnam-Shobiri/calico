@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -32,8 +33,11 @@ import (
 	"github.com/gofrs/flock"
 	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils"
+	"github.com/projectcalico/calico/cni-plugin/pkg/k8s"
 	"github.com/projectcalico/calico/cni-plugin/pkg/types"
 	"github.com/projectcalico/calico/cni-plugin/pkg/upgrade"
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
@@ -165,10 +169,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		attrs[ipam.AttributeNamespace] = epIDs.Namespace
 	}
 
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-
 	r := &cniv1.Result{}
 	if ipamArgs.IP != nil {
 		logger.Infof("Calico CNI IPAM request IP: %v", ipamArgs.IP)
@@ -183,6 +183,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 		assignIPWithLock := func() error {
 			unlock := acquireIPAMLockBestEffort(conf.IPAMLockFile)
 			defer unlock()
+
+			// Only start the timeout after we get the lock. When there's a
+			// thundering herd of new pods, acquiring the lock can take a while.
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+
+			if err := maybeUpgradeIPAM(ctx, calicoClient.IPAM(), nodename); err != nil {
+				return fmt.Errorf("failed to upgrade IPAM database: %w", err)
+			}
+
 			return calicoClient.IPAM().AssignIP(ctx, assignArgs)
 		}
 		err := assignIPWithLock()
@@ -224,14 +234,22 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		logger.Infof("Calico CNI IPAM request count IPv4=%d IPv6=%d", num4, num6)
 
-		v4pools, err := utils.ResolvePools(ctx, calicoClient, conf.IPAM.IPv4Pools, true)
-		if err != nil {
-			return err
+		var v4pools, v6pools []cnet.IPNet
+		{
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			v4pools, err = utils.ResolvePools(ctx, calicoClient, conf.IPAM.IPv4Pools, true)
+			if err != nil {
+				return err
+			}
 		}
-
-		v6pools, err := utils.ResolvePools(ctx, calicoClient, conf.IPAM.IPv6Pools, false)
-		if err != nil {
-			return err
+		{
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			v6pools, err = utils.ResolvePools(ctx, calicoClient, conf.IPAM.IPv6Pools, false)
+			if err != nil {
+				return err
+			}
 		}
 
 		logger.Debugf("Calico CNI IPAM handle=%s", handleID)
@@ -242,6 +260,22 @@ func cmdAdd(args *skel.CmdArgs) error {
 			logrus.Info("Running in single-HNS-network mode, limiting number of IPAM blocks to 1.")
 			maxBlocks = 1
 		}
+		// Get namespace information for namespaceSelector support
+		namespace := epIDs.Namespace
+		var namespaceObj *corev1.Namespace
+
+		// Only attempt to fetch namespace if we have Kubernetes configuration and a valid namespace
+		if (conf.Kubernetes.Kubeconfig != "" || conf.Policy.PolicyType == "k8s") && namespace != "" {
+			logger.Debugf("Getting namespace for: %s", namespace)
+
+			namespaceObj, err = getNamespace(conf, namespace, logger)
+			if err != nil {
+				logger.WithError(err).Errorf("Failed to get namespace for %s", namespace)
+				return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
+			}
+			logger.Debugf("Got namespace for %s: %v", namespace, namespaceObj.Labels)
+		}
+
 		assignArgs := ipam.AutoAssignArgs{
 			Num4:             num4,
 			Num6:             num6,
@@ -252,7 +286,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 			MaxBlocksPerHost: maxBlocks,
 			Attrs:            attrs,
 			IntendedUse:      v3.IPPoolAllowedUseWorkload,
+			Namespace:        namespaceObj,
 		}
+
 		if runtime.GOOS == "windows" {
 			rsvdAttrWindows := &ipam.HostReservedAttr{
 				StartOfBlock: 3,
@@ -263,16 +299,22 @@ func cmdAdd(args *skel.CmdArgs) error {
 			assignArgs.HostReservedAttrIPv4s = rsvdAttrWindows
 		}
 		logger.WithField("assignArgs", assignArgs).Info("Auto assigning IP")
-		autoAssignWithLock := func(calicoClient client.Interface, ctx context.Context, assignArgs ipam.AutoAssignArgs) (*ipam.IPAMAssignments, *ipam.IPAMAssignments, error) {
+		autoAssignWithLock := func(calicoClient client.Interface, assignArgs ipam.AutoAssignArgs) (*ipam.IPAMAssignments, *ipam.IPAMAssignments, error) {
 			// Acquire a best-effort host-wide lock to prevent multiple copies of the CNI plugin trying to assign
 			// concurrently. AutoAssign is concurrency safe already but serialising the CNI plugins means that
 			// we only attempt one IPAM claim at a time on the host's active IPAM block.  This reduces the load
 			// on the API server by a factor of the number of concurrent requests.
 			unlock := acquireIPAMLockBestEffort(conf.IPAMLockFile)
 			defer unlock()
+
+			// Only start the timeout after we get the lock. When there's a
+			// thundering herd of new pods, acquiring the lock can take a while.
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+
 			return calicoClient.IPAM().AutoAssign(ctx, assignArgs)
 		}
-		v4Assignments, v6Assignments, err := autoAssignWithLock(calicoClient, ctx, assignArgs)
+		v4Assignments, v6Assignments, err := autoAssignWithLock(calicoClient, assignArgs)
 		var v4ips, v6ips []cnet.IPNet
 		if v4Assignments != nil {
 			v4ips = v4Assignments.IPs
@@ -294,7 +336,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 				for _, v6 := range v6Assignments.IPs {
 					v6IPs = append(v6IPs, ipam.ReleaseOptions{Address: v6.IP.String()})
 				}
-				_, _, err := calicoClient.IPAM().ReleaseIPs(ctx, v6IPs...)
+
+				// Fresh timeout for cleanup.
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_, _, err := calicoClient.IPAM().ReleaseIPs(cleanupCtx, v6IPs...)
 				if err != nil {
 					logrus.Errorf("Error releasing IPv6 addresses %+v on IPv4 address assignment failure: %s", v6IPs, err)
 				}
@@ -310,7 +356,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 				for _, v4 := range v4Assignments.IPs {
 					v4IPs = append(v4IPs, ipam.ReleaseOptions{Address: v4.IP.String()})
 				}
-				_, _, err := calicoClient.IPAM().ReleaseIPs(ctx, v4IPs...)
+
+				// Fresh timeout for cleanup.
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_, _, err := calicoClient.IPAM().ReleaseIPs(cleanupCtx, v4IPs...)
 				if err != nil {
 					logrus.Errorf("Error releasing IPv4 addresses %+v on IPv6 address assignment failure: %s", v4IPs, err)
 				}
@@ -342,6 +392,41 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	// Print result to stdout, in the format defined by the requested cniVersion.
 	return cnitypes.PrintResult(r, conf.CNIVersion)
+}
+
+const ipamUpgradedFilePath = "/var/run/calico/cni/ipam_upgraded"
+
+func maybeUpgradeIPAM(ctx context.Context, ipamClient ipam.Interface, nodename string) error {
+	if _, err := os.Stat(ipamUpgradedFilePath); err == nil {
+		return nil
+	}
+
+	err := ipamClient.UpgradeHost(ctx, nodename)
+	if err != nil {
+		return fmt.Errorf("failed to upgrade IPAM database: %w", err)
+	}
+
+	if err := touchFile(ipamUpgradedFilePath); err != nil {
+		return fmt.Errorf("failed to create IPAM upgrade marker file %s: %w", ipamUpgradedFilePath, err)
+	}
+	return nil
+}
+
+func touchFile(filePath string) error {
+	dirPath, _ := path.Split(filePath)
+	err := os.MkdirAll(dirPath, 0o755)
+	if err != nil {
+		return fmt.Errorf("failed to create directory for file %s: %w", filePath, err)
+	}
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", filePath, err)
+	}
+	err = file.Close()
+	if err != nil {
+		return fmt.Errorf("failure when closing file %s: %w", filePath, err)
+	}
+	return nil
 }
 
 type unlockFn func()
@@ -449,4 +534,25 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	return nil
+}
+
+// getNamespace retrieves namespace object using Kubernetes clientset
+func getNamespace(conf types.NetConf, namespace string, logger *logrus.Entry) (*corev1.Namespace, error) {
+	if namespace == "" {
+		return nil, nil
+	}
+
+	// Create Kubernetes clientset
+	k8sClient, err := k8s.NewK8sClient(conf, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get namespace directly from Kubernetes API
+	ns, err := k8sClient.CoreV1().Namespaces().Get(context.Background(), namespace, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return ns, nil
 }

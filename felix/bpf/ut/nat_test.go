@@ -19,14 +19,13 @@ import (
 	"net"
 	"testing"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
 	. "github.com/onsi/gomega"
 
 	"github.com/projectcalico/calico/felix/bpf/arp"
 	"github.com/projectcalico/calico/felix/bpf/conntrack"
-	conntrack3 "github.com/projectcalico/calico/felix/bpf/conntrack/v3"
-	v3 "github.com/projectcalico/calico/felix/bpf/conntrack/v3"
+	v4 "github.com/projectcalico/calico/felix/bpf/conntrack/v4"
 	"github.com/projectcalico/calico/felix/bpf/counters"
 	"github.com/projectcalico/calico/felix/bpf/nat"
 	"github.com/projectcalico/calico/felix/bpf/polprog"
@@ -197,7 +196,7 @@ func TestNATPodPodXNode(t *testing.T) {
 	Expect(ok).To(BeTrue())
 	// No NATing, service already resolved
 	Expect(v.Type()).To(Equal(conntrack.TypeNormal))
-	Expect(v.Flags()).To(Equal(uint16(0)))
+	Expect(v.Flags()).To(Equal(v4.FlagSetDSCP))
 
 	// Arriving at workload at node 2
 	expectMark(tcdefs.MarkSeen)
@@ -432,7 +431,7 @@ func TestNATNodePort(t *testing.T) {
 	v, ok := ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagNATNPFwd))
+	Expect(v.Flags()).To(Equal(v4.FlagNATNPFwd | v4.FlagSetDSCP))
 
 	expectMark(tcdefs.MarkSeenBypassForward)
 	// Leaving node 1
@@ -550,7 +549,7 @@ func TestNATNodePort(t *testing.T) {
 	v, ok = ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagExtLocal))
+	Expect(v.Flags()).To(Equal(v4.FlagExtLocal | v4.FlagSetDSCP))
 
 	dumpARPMap(arpMap)
 
@@ -1222,7 +1221,7 @@ func TestNATNodePortNoFWD(t *testing.T) {
 	v, ok := ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagExtLocal))
+	Expect(v.Flags()).To(Equal(v4.FlagExtLocal | v4.FlagSetDSCP))
 
 	// Arriving at workload
 	runBpfTest(t, "calico_to_workload_ep", rulesDefaultAllow, func(bpfrun bpfProgRunFn) {
@@ -1639,7 +1638,7 @@ func TestNATNodePortICMPTooBig(t *testing.T) {
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
 
-		checkICMPTooBig(pktR, ipv4, udp, natTunnelMTU)
+		checkICMPTooBig(pktR, ipv4, udp, ipv4.DstIP, natTunnelMTU)
 	})
 
 	expectMark(tcdefs.MarkSeenBypassForward)
@@ -2126,7 +2125,7 @@ func TestNATNodePortIngressDSR(t *testing.T) {
 	v, ok := ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagNATFwdDsr | conntrack3.FlagNATNPFwd))
+	Expect(v.Flags()).To(Equal(v4.FlagNATFwdDsr | v4.FlagNATNPFwd | v4.FlagSetDSCP))
 }
 
 func TestNATNodePortDSROptout(t *testing.T) {
@@ -2227,7 +2226,7 @@ func TestNATNodePortDSROptout(t *testing.T) {
 	v, ok := ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagNATFwdDsr | conntrack3.FlagNATNPFwd))
+	Expect(v.Flags()).To(Equal(v4.FlagNATFwdDsr | v4.FlagNATNPFwd | v4.FlagSetDSCP))
 
 	// N.B. we skip the forward part from node, we just needed to have the right packet.
 
@@ -2329,7 +2328,7 @@ func TestNATNodePortDSROptout(t *testing.T) {
 	v, ok = ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagExtLocal | conntrack3.FlagNoDSR))
+	Expect(v.Flags()).To(Equal(v4.FlagExtLocal | v4.FlagNoDSR | v4.FlagSetDSCP))
 
 	skbMark = tcdefs.MarkSeen
 
@@ -2800,7 +2799,7 @@ func TestNATHostRemoteNPLocalPod(t *testing.T) {
 	v, ok := ct[conntrack.NewKey(uint8(ipv4.Protocol), ipv4.SrcIP, uint16(udp.SrcPort), natIP.To4(), natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(v3.FlagNPLoop))
+	Expect(v.Flags()).To(Equal(v4.FlagNPLoop))
 
 	// Arriving at workload
 	runBpfTest(t, "calico_to_workload_ep", rulesDefaultAllow, func(bpfrun bpfProgRunFn) {
@@ -2846,6 +2845,9 @@ func TestNATHostRemoteNPLocalPod(t *testing.T) {
 
 func TestNATPodPodXNodeV6(t *testing.T) {
 	RegisterTestingT(t)
+
+	cleanUpMaps()
+	defer cleanUpMaps()
 
 	bpfIfaceName = "NAT1"
 	defer func() { bpfIfaceName = "" }()
@@ -2923,7 +2925,7 @@ func TestNATPodPodXNodeV6(t *testing.T) {
 	runBpfTest(t, "calico_from_workload_ep", rulesDefaultAllow, func(bpfrun bpfProgRunFn) {
 		res, err := bpfrun(pktBytes)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
 
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
@@ -2981,7 +2983,7 @@ func TestNATPodPodXNodeV6(t *testing.T) {
 	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
 		res, err := bpfrun(natedPkt)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
 
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
@@ -2995,7 +2997,7 @@ func TestNATPodPodXNodeV6(t *testing.T) {
 	Expect(ok).To(BeTrue())
 	// No NATing, service already resolved
 	Expect(v.Type()).To(Equal(conntrack.TypeNormal))
-	Expect(v.Flags()).To(Equal(uint16(0)))
+	Expect(v.Flags()).To(Equal(v4.FlagSetDSCP))
 
 	// Arriving at workload at node 2
 	expectMark(tcdefs.MarkSeen)
@@ -3220,7 +3222,7 @@ func TestNATNodePortV6(t *testing.T) {
 	v, ok := ct[conntrack.NewKeyV6(uint8(17 /* UDP */), ipv6.SrcIP, uint16(udp.SrcPort), natIP, natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagNATNPFwd))
+	Expect(v.Flags()).To(Equal(v4.FlagNATNPFwd | v4.FlagSetDSCP))
 
 	expectMark(tcdefs.MarkSeenBypassForward)
 	// Leaving node 1
@@ -3285,7 +3287,7 @@ func TestNATNodePortV6(t *testing.T) {
 	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
 		res, err := bpfrun(encapedPkt)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
 
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
@@ -3338,7 +3340,7 @@ func TestNATNodePortV6(t *testing.T) {
 	v, ok = ct[conntrack.NewKeyV6(uint8(17 /* UDP */), ipv6.SrcIP, uint16(udp.SrcPort), natIP, natPort)]
 	Expect(ok).To(BeTrue())
 	Expect(v.Type()).To(Equal(conntrack.TypeNATReverse))
-	Expect(v.Flags()).To(Equal(conntrack3.FlagExtLocal))
+	Expect(v.Flags()).To(Equal(v4.FlagExtLocal | v4.FlagSetDSCP))
 
 	dumpARPMapV6(arpMapV6)
 
@@ -3488,7 +3490,7 @@ func TestNATNodePortV6(t *testing.T) {
 	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
 		res, err := bpfrun(encapedPkt)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
 
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
@@ -3633,7 +3635,7 @@ func TestNATNodePortV6(t *testing.T) {
 		runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
 			res, err := bpfrun(encapedPktArrivesAtNode2)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+			Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
 
 			pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 			fmt.Printf("pktR = %+v\n", pktR)
@@ -3711,4 +3713,72 @@ func TestNATNodePortV6(t *testing.T) {
 			checkVxlan(pktR)
 		}, withHostNetworked(), withIPv6())
 	}
+}
+
+// TestNATOutExcludeHosts tests the NATOutgoingExclusions option in FelixConfig. When
+// it's set to 'IPPoolsAndHostIPs', the CALI_GLOBALS_NATOUTGOING_EXCLUDE_HOSTS global
+// flag will be set and packets to any hosts should not be SNAT'ed.
+func TestNATOutExcludeHosts(t *testing.T) {
+	RegisterTestingT(t)
+
+	// Reset NAT maps.
+	natMap := nat.FrontendMap()
+	err := natMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	resetMap(natMap)
+	defer resetMap(natMap)
+
+	natBEMap := nat.BackendMap()
+	err = natBEMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	resetMap(natBEMap)
+	defer resetMap(natBEMap)
+
+	_, _, _, _, pktBytes, err := testPacketUDPDefault()
+	Expect(err).NotTo(HaveOccurred())
+
+	hostIP = node1ip
+	// Insert a reverse route for the source workload (flagged in IP pool and NAT-outgoing).
+	rtKey := routes.NewKey(srcV4CIDR).AsBytes()
+	rtVal := routes.NewValueWithIfIndex(routes.FlagsLocalWorkload|routes.FlagInIPAMPool|routes.FlagNATOutgoing, 1).AsBytes()
+
+	rtMap := routes.Map()
+	err = rtMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	resetRTMap(rtMap)
+	defer resetRTMap(rtMap)
+	err = rtMap.Update(rtKey, rtVal)
+	Expect(err).NotTo(HaveOccurred())
+	// Insert a route for the dest ip (flagged as remote host).
+	rtKey = routes.NewKey(dstV4CIDR).AsBytes()
+	rtVal = routes.NewValue(routes.FlagsRemoteHost).AsBytes()
+
+	err = rtMap.Update(rtKey, rtVal)
+	Expect(err).NotTo(HaveOccurred())
+
+	ctMap := conntrack.Map()
+	err = ctMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	resetCTMap(ctMap)
+	defer resetCTMap(ctMap)
+
+	// Run the program without the "exclude hosts" config. Expect SNAT to happen.
+	skbMark = 0
+	runBpfTest(t, "calico_from_workload_ep", rulesDefaultAllow, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pktBytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+	})
+	expectMark(tcdefs.MarkSeenNATOutgoing)
+
+	// Run the program with the "exclude hosts" config. Expect no SNAT to happen (and a redirect
+	// to host to happen as well).
+	resetCTMap(ctMap)
+	skbMark = 0
+	runBpfTest(t, "calico_from_workload_ep", rulesDefaultAllow, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pktBytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Retval).To(Equal(resTC_ACT_REDIRECT))
+	}, withNATOutExcludeHosts())
+	expectMark(tcdefs.MarkSeen)
 }

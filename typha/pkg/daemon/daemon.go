@@ -394,6 +394,7 @@ func (t *TyphaDaemon) CreateServer() {
 			ShutdownMaxDropInterval:        t.ConfigParams.ShutdownConnectionDropIntervalMaxSecs,
 			MaxConns:                       t.ConfigParams.MaxConnectionsUpperLimit,
 			Port:                           t.ConfigParams.ServerPort,
+			Host:                           t.ConfigParams.ServerHost,
 			HealthAggregator:               t.healthAggregator,
 			KeyFile:                        t.ConfigParams.ServerKeyFile,
 			CertFile:                       t.ConfigParams.ServerCertFile,
@@ -426,12 +427,32 @@ func (t *TyphaDaemon) Start(cxt context.Context) {
 		debugserver.StartDebugPprofServer(t.ConfigParams.DebugHost, t.ConfigParams.DebugPort)
 	}
 	if t.ConfigParams.PrometheusMetricsEnabled {
-		log.Info("Prometheus metrics enabled.  Starting server.")
+		log.Info("Prometheus metrics enabled.")
 		t.configurePrometheusMetrics()
-		go metricsserver.ServePrometheusMetricsForever(
-			t.ConfigParams.PrometheusMetricsHost,
-			t.ConfigParams.PrometheusMetricsPort,
-		)
+		if t.ConfigParams.PrometheusMetricsKeyFile != "" || t.ConfigParams.PrometheusMetricsCertFile != "" {
+			log.Info("Trying to start metrics https server.")
+			go func() {
+				err := metricsserver.ServePrometheusMetricsHTTPS(
+					prometheus.DefaultGatherer,
+					t.ConfigParams.PrometheusMetricsHost,
+					t.ConfigParams.PrometheusMetricsPort,
+					t.ConfigParams.PrometheusMetricsCertFile,
+					t.ConfigParams.PrometheusMetricsKeyFile,
+					t.ConfigParams.PrometheusMetricsClientAuth,
+					t.ConfigParams.PrometheusMetricsCAFile,
+				)
+				if err != nil {
+					log.Info("Error starting metrics https server.", err)
+				}
+			}()
+		} else {
+			log.Info("Starting metrics http server.")
+			go metricsserver.ServePrometheusMetricsHTTP(
+				prometheus.DefaultGatherer,
+				t.ConfigParams.PrometheusMetricsHost,
+				t.ConfigParams.PrometheusMetricsPort,
+			)
+		}
 	}
 
 	if t.ConfigParams.HealthEnabled {

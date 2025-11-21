@@ -134,8 +134,8 @@ function prepare_windows_images(){
     CALICO_NODE_IMAGE="node-windows-$GIT_VERSION-ltsc2022.tar"
     CALICO_CNI_IMAGE="cni-windows-$GIT_VERSION-ltsc2022.tar"
   else
-    CALICO_NODE_IMAGE="node-windows-$GIT_VERSION-1809.tar"
-    CALICO_CNI_IMAGE="cni-windows-$GIT_VERSION-1809.tar"
+    CALICO_NODE_IMAGE="node-windows-$GIT_VERSION-ltsc2019.tar"
+    CALICO_CNI_IMAGE="cni-windows-$GIT_VERSION-ltsc2019.tar"
   fi
 }
 
@@ -160,7 +160,6 @@ function prepare_fv(){
     sed -i "s?<your container runtime>?containerd?g" $FV_RUN_FELIX
     sed -i "s?<your containerd version>?${CONTAINERD_VERSION}?g" $FV_RUN_FELIX
     sed -i "s?<your fv type>?tigera-felix?g" $FV_RUN_FELIX
-    sed -i "s?<your fv provisioner>?capz?g" $FV_RUN_FELIX
     sed -i "s?win-fv.exe?win-felix-fv.exe?g" $FV_RUN_FELIX
   fi
 

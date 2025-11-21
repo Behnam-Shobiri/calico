@@ -44,6 +44,11 @@ import (
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 )
 
+const (
+	// Path to the file that contains the MTU value.
+	MTUFilePath = "/var/lib/calico/mtu"
+)
+
 // DetermineNodename gets the node name, in order of priority:
 // 1. Nodename field in NetConf
 // 2. Nodename from the file /var/lib/calico/nodename
@@ -89,21 +94,32 @@ func nodenameFromFile(filename string) string {
 
 // MTUFromFile reads the /var/lib/calico/mtu file if it exists and
 // returns the MTU within.
-func MTUFromFile(filename string) (int, error) {
+// If the file does not exist and RequireMTUFile is false, it returns 0 and nil.
+// If the file does not exist and RequireMTUFile is true, it returns 0 and an error.
+// If there are other errors reading the file, it returns 0 and the error.
+func MTUFromFile(filename string, conf types.NetConf) (int, error) {
 	if filename == "" {
-		filename = "/var/lib/calico/mtu"
+		filename = MTUFilePath
 	}
+
 	data, err := os.ReadFile(filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// File doesn't exist, return zero.
-			logrus.Infof("File %s does not exist", filename)
-			return 0, nil
-		}
-		logrus.WithError(err).Errorf("Failed to read %s", filename)
-		return 0, err
+	if err == nil {
+		return strconv.Atoi(strings.TrimSpace(string(data)))
 	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+
+	// Handle file not existing case
+	if os.IsNotExist(err) {
+		if conf.RequireMTUFile {
+			logrus.WithField("filename", filename).WithError(err).Errorf("File does not exist")
+			return 0, err
+		}
+		logrus.WithField("filename", filename).WithError(err).Errorf("File does not exist, skipping the error since RequireMTUFile is false")
+		return 0, nil
+	}
+
+	// Handle other errors
+	logrus.WithError(err).Errorf("Failed to read %s", filename)
+	return 0, err
 }
 
 // CreateOrUpdate creates the WorkloadEndpoint if ResourceVersion is not specified,
@@ -190,7 +206,8 @@ func DeleteIPAM(conf types.NetConf, args *skel.CmdArgs, logger *logrus.Entry) er
 		"type": conf.IPAM.Type}).Debug("Looking for IPAM plugin in paths")
 
 	var ae *azure.AzureEndpoint
-	if conf.IPAM.Type == "host-local" {
+	switch conf.IPAM.Type {
+	case "host-local":
 		// We need to replace "usePodCidr" with a valid, but dummy podCidr string with "host-local" IPAM.
 		// host-local IPAM releases the IP by ContainerID, so podCidr isn't really used to release the IP.
 		// It just needs a valid CIDR, but it doesn't have to be the CIDR associated with the host.
@@ -217,7 +234,7 @@ func DeleteIPAM(conf types.NetConf, args *skel.CmdArgs, logger *logrus.Entry) er
 			return err
 		}
 		logger.Debug("Updated stdin data for Delete Cmd")
-	} else if conf.IPAM.Type == "azure-vnet-ipam" {
+	case "azure-vnet-ipam":
 		// The azure-vnet-ipam plugin expects two values to be passed in the CNI config in order to
 		// successfully clean up: ipAddress and subnet. Populate these based on data stored to disk.
 		logger.Info("Configured to use Azure IPAM, load network and endpoint")
@@ -418,7 +435,7 @@ func validateStartRange(startRange net.IP, expStartRange net.IP) (net.IP, error)
 	startRange = startRange.To4()
 	expStartRange = expStartRange.To4()
 	if startRange == nil || expStartRange == nil {
-		return nil, fmt.Errorf("Invalid ip address")
+		return nil, fmt.Errorf("invalid ip address")
 	}
 	if bytes.Compare([]byte(startRange), []byte(expStartRange)) < 0 {
 		// if ip is not in given range,return default
@@ -433,7 +450,7 @@ func validateEndRange(endRange net.IP, expEndRange net.IP) (net.IP, error) {
 	endRange = endRange.To4()
 	expEndRange = expEndRange.To4()
 	if endRange == nil || expEndRange == nil {
-		return nil, fmt.Errorf("Invalid ip address")
+		return nil, fmt.Errorf("invalid ip address")
 	}
 	if bytes.Compare([]byte(endRange), []byte(expEndRange)) > 0 {
 		// if ip is not in given range,return default
@@ -467,7 +484,7 @@ func validateRangeOrSetDefault(rangeData string, expRange string, ipnet *net.IPN
 		}
 	}
 	// return default range
-	return expRangeIP.IP.String(), nil
+	return expRangeIP.String(), nil
 
 }
 
@@ -494,7 +511,7 @@ func SanitizeMesosLabel(s string) string {
 	trailingLeadingDotsDashes := regexp.MustCompile("^[.-]*(.*?)[.-]*$")
 
 	// -  Convert [/] to .
-	s = strings.Replace(s, "/", ".", -1)
+	s = strings.ReplaceAll(s, "/", ".")
 
 	// -  Convert any other invalid chars
 	s = invalidChar.ReplaceAllString(s, "-")

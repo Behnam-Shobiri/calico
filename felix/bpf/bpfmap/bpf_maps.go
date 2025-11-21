@@ -31,6 +31,7 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/maps"
 	"github.com/projectcalico/calico/felix/bpf/nat"
 	"github.com/projectcalico/calico/felix/bpf/profiling"
+	"github.com/projectcalico/calico/felix/bpf/qos"
 	"github.com/projectcalico/calico/felix/bpf/routes"
 	"github.com/projectcalico/calico/felix/bpf/state"
 )
@@ -46,6 +47,8 @@ type IPMaps struct {
 	CtMap        maps.Map
 	SrMsgMap     maps.Map
 	CtNatsMap    maps.Map
+	CtCleanupMap maps.Map
+	MaglevMap    maps.Map
 }
 
 type CommonMaps struct {
@@ -58,6 +61,8 @@ type CommonMaps struct {
 	XDPProgramsMap  maps.Map
 	XDPJumpMap      maps.MapWithDeleteIfExists
 	ProfilingMap    maps.Map
+	CTLBProgramsMap []maps.Map
+	QoSMap          maps.MapWithUpdateWithFlags
 }
 
 type Maps struct {
@@ -90,6 +95,8 @@ func getCommonMaps() *CommonMaps {
 		XDPProgramsMap:  hook.NewXDPProgramsMap(),
 		XDPJumpMap:      jump.XDPMap().(maps.MapWithDeleteIfExists),
 		ProfilingMap:    profiling.Map(),
+		CTLBProgramsMap: nat.ProgramsMap(),
+		QoSMap:          qos.Map().(maps.MapWithUpdateWithFlags),
 	}
 }
 
@@ -117,9 +124,10 @@ func getIPMaps(ipFamily int) *IPMaps {
 		AffinityMap:  getmap(nat.AffinityMap, nat.AffinityMapV6),
 		RouteMap:     getmap(routes.Map, routes.MapV6),
 		CtMap:        getmap(conntrack.Map, conntrack.MapV6),
+		CtCleanupMap: getmapWithExistsCheck(conntrack.CleanupMap, conntrack.CleanupMapV6),
 		SrMsgMap:     getmap(nat.SendRecvMsgMap, nat.SendRecvMsgMapV6),
 		CtNatsMap:    getmap(nat.AllNATsMsgMap, nat.AllNATsMsgMapV6),
-	}
+		MaglevMap:    getmapWithExistsCheck(nat.MaglevMap, nat.MaglevMapV6)}
 }
 
 func CreateBPFMaps(ipV6Enabled bool) (*Maps, error) {
@@ -135,7 +143,6 @@ func CreateBPFMaps(ipV6Enabled bool) (*Maps, error) {
 	for i, bpfMap := range mps {
 		err := bpfMap.EnsureExists()
 		if err != nil {
-
 			for j := 0; j < i; j++ {
 				m := mps[j]
 				os.Remove(m.(pinnedMap).Path())
@@ -172,6 +179,10 @@ func (c *CommonMaps) slice() []maps.Map {
 		c.XDPProgramsMap,
 		c.XDPJumpMap,
 		c.ProfilingMap,
+		c.CTLBProgramsMap[0],
+		c.CTLBProgramsMap[1],
+		c.CTLBProgramsMap[2],
+		c.QoSMap,
 	}
 }
 
@@ -185,8 +196,10 @@ func (i *IPMaps) slice() []maps.Map {
 		i.AffinityMap,
 		i.RouteMap,
 		i.CtMap,
+		i.CtCleanupMap,
 		i.SrMsgMap,
 		i.CtNatsMap,
+		i.MaglevMap,
 	}
 }
 

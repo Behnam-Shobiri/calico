@@ -40,6 +40,7 @@ const (
 	RouteClassVXLANTunnel
 	RouteClassIPIPSameSubnet
 	RouteClassIPIPTunnel
+	RouteClassNoEncap
 	RouteClassIPAMBlockDrop
 
 	RouteClassMax
@@ -48,7 +49,7 @@ const (
 func (c RouteClass) IsRemote() bool {
 	switch c {
 	case RouteClassVXLANTunnel, RouteClassVXLANSameSubnet, RouteClassWireguard,
-		RouteClassIPIPTunnel, RouteClassIPIPSameSubnet:
+		RouteClassIPIPTunnel, RouteClassIPIPSameSubnet, RouteClassNoEncap:
 		return true
 	default:
 		return false
@@ -61,11 +62,11 @@ const (
 )
 
 var (
-	ConnectFailed   = errors.New("connect to netlink failed")
-	ListFailed      = errors.New("netlink list operation failed")
-	UpdateFailed    = errors.New("netlink update operation failed")
-	IfaceNotPresent = errors.New("interface not present")
-	IfaceDown       = errors.New("interface down")
+	ErrConnectFailed   = errors.New("connect to netlink failed")
+	ErrListFailed      = errors.New("netlink list operation failed")
+	ErrUpdateFailed    = errors.New("netlink update operation failed")
+	ErrIfaceNotPresent = errors.New("interface not present")
+	ErrIfaceDown       = errors.New("interface down")
 )
 
 type Target struct {

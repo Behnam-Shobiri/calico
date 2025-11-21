@@ -1,6 +1,7 @@
 BINDIR?=bin
 ARCH?=amd64
-KIND_VERSION?=v0.22.0
+KIND_VERSION?=v0.24.0
+KUBE_VERSION?=v1.31.0
 
 ###############################################################################
 # ASO management
@@ -21,7 +22,7 @@ ifeq (,$(wildcard $(ASO_INSTALLED_MARKER)))
 	@echo "ASO ready marker '$(ASO_INSTALLED_MARKER)' does not exist, doing nothing"
 else
 	@echo "Azure resources for cluster $(CLUSTER_NAME_CAPZ) will now be deleted, this can take up to 20 minutes"
-	-$(BINDIR)/kind delete cluster --name kind${SUFFIX} 
+	-$(BINDIR)/kind delete cluster --name kind
 	-rm -f kubeconfig
 	-rm -f $(ASO_INSTALLED_MARKER)
 endif
@@ -40,18 +41,15 @@ create-vmss: $(VMSS_MARKER)
 $(VMSS_MARKER): $(BINDIR)/kubectl $(BINDIR)/gomplate
 	@echo "Creating azure resources include vmss-linux and vmss-windows ..."
 	./vmss.sh create
-	./vmss.sh show
+	./vmss.sh info
+	./vmss.sh confirm-ssh
 	touch $@
 
 .PHONY: delete-vmss
 delete-vmss: $(BINDIR)/kubectl
-ifeq (,$(wildcard $(VMSS_MARKER)))
-	@echo "VMSS ready marker '$(VMSS_MARKER)' does not exist, doing nothing"
-else
 	@echo "Azure resources for cluster will be deleted..."
-	-$(BINDIR)/kubectl delete ns winfv
+	./vmss.sh delete
 	-rm -f $(VMSS_MARKER)
-endif
 
 ###############################################################################
 # FV management
@@ -74,6 +72,7 @@ $(BINDIR)/kind:
 
 $(BINDIR)/kubectl:
 	mkdir -p $(@D)
+	@echo "Downloading kubectl version: $(KUBE_VERSION)"
 	curl -sSf -L --retry 5 https://dl.k8s.io/release/$(KUBE_VERSION)/bin/linux/$(ARCH)/kubectl -o $@
 	chmod +x $@
 	touch $@
@@ -104,6 +103,7 @@ clean: delete-vmss uninstall-aso
 	-rm -rf ./report
 	-rm -f .sshkey .sshkey.pub
 	-rm -f $(HELPERS)
+	-rm -f bin/*
 
 .PHONY: dist-clean
 dist-clean: clean

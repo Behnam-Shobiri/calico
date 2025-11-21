@@ -9,9 +9,10 @@
 #include "skb.h"
 #include "routes.h"
 
-#define RPF_RES_FAIL	0
-#define RPF_RES_STRICT	1
-#define RPF_RES_LOOSE	2
+#define RPF_RES_FAIL		0
+#define RPF_RES_STRICT		1
+#define RPF_RES_LOOSE		2
+#define RPF_RES_DISABLED	3
 
 static CALI_BPF_INLINE int wep_rpf_check(struct cali_tc_ctx *ctx, struct cali_rt *r)
 {
@@ -30,9 +31,9 @@ static CALI_BPF_INLINE int wep_rpf_check(struct cali_tc_ctx *ctx, struct cali_rt
                 CALI_INFO("Workload RPF fail: not a local workload.");
                 return RPF_RES_FAIL;
         }
-        if (r->if_index != ctx->skb->ifindex) {
+        if (CALI_RT_IFINDEX(r) != ctx->skb->ifindex) {
                 CALI_INFO("Workload RPF fail skb iface (%d) != route iface (%d)",
-                                ctx->skb->ifindex, r->if_index);
+                                ctx->skb->ifindex, CALI_RT_IFINDEX(r));
                 return RPF_RES_FAIL;
         }
 
@@ -48,12 +49,12 @@ static CALI_BPF_INLINE int hep_rpf_check(struct cali_tc_ctx *ctx)
 #endif
 	if (!(GLOBAL_FLAGS & CALI_GLOBALS_RPF_OPTION_ENABLED)) {
 		CALI_DEBUG("Host RPF check disabled");
-		return true;
+		return RPF_RES_DISABLED;
 	}
 
 #ifdef IPVER6
 	if (ctx->state->ip_proto == IPPROTO_ICMPV6) {
-		return true;
+		return RPF_RES_LOOSE;
 	}
 	if (ip_link_local(ctx->state->ip_dst) && ip_link_local(ctx->state->ip_src)) {
 		linkLocal = true;

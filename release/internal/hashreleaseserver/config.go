@@ -15,48 +15,32 @@
 package hashreleaseserver
 
 import (
+	"context"
 	"fmt"
-	"strings"
+
+	"cloud.google.com/go/storage"
 )
 
-// Config holds the configuration for an SSH connection
+// Config holds the configuration for hashrelease publishing.
 type Config struct {
-	// Host is the host for the SSH connection
-	Host string
 
-	// User is the user for the SSH connection
-	User string
+	// cloud storage bucket name
+	BucketName string
 
-	// Key is the path to the SSH key
-	Key string
-
-	// Port is the port for the SSH connection
-	Port string
-
-	// KnownHosts is the absolute path to the known_hosts file
-	// to use for the user host key database instead of ~/.ssh/known_hosts
-	KnownHosts string
-}
-
-// RSHCommand returns the ssh command for rsync to use for the connection
-func (s *Config) RSHCommand() string {
-	str := []string{"ssh", "-i", s.Key, "-p", s.Port, "-q", "-o StrictHostKeyChecking=yes"}
-	if s.KnownHosts != "" {
-		str = append(str, "-o UserKnownHostsFile="+s.KnownHosts)
-	}
-	return strings.Join(str, " ")
-}
-
-// HostString returns the host string in the format user@host
-func (s *Config) HostString() string {
-	return s.User + "@" + s.Host
-}
-
-// Address returns the address in the format host:port
-func (s *Config) Address() string {
-	return fmt.Sprintf("%s:%s", s.Host, s.Port)
+	gcsClient *storage.Client
 }
 
 func (s *Config) Valid() bool {
-	return s.Host != "" && s.User != "" && s.Key != "" && s.Port != ""
+	return s.BucketName != ""
+}
+
+func (s *Config) Bucket() (*storage.BucketHandle, error) {
+	if s.gcsClient == nil {
+		cli, err := storage.NewClient(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create storage client: %w", err)
+		}
+		s.gcsClient = cli
+	}
+	return s.gcsClient.Bucket(s.BucketName), nil
 }

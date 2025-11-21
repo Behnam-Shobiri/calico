@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2020 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,19 +37,20 @@ var _ = Describe("Test Node conversion", func() {
 				Annotations: map[string]string{
 					nodeBgpIpv4AddrAnnotation: "172.17.17.10",
 					nodeBgpAsnAnnotation:      "2546",
+					nodeInterfacesAnnotation:  "[{\"name\":\"eth1\",\"addresses\":[\"172.31.11.4\"]},{\"name\":\"eth0\",\"addresses\":[\"172.17.17.10\",\"172.17.17.11\"]}]",
 				},
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "172.17.17.10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "192.168.1.100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "172-17-17-10",
 					},
@@ -67,12 +68,24 @@ var _ = Describe("Test Node conversion", func() {
 		bgpIpv4Address := n.Value.(*libapiv3.Node).Spec.BGP.IPv4Address
 		ipInIpAddr := n.Value.(*libapiv3.Node).Spec.BGP.IPv4IPIPTunnelAddr
 		asn := n.Value.(*libapiv3.Node).Spec.BGP.ASNumber
+		nodeInterfaces := n.Value.(*libapiv3.Node).Spec.Interfaces
 
 		ip := net.ParseIP("172.17.17.10")
+		parsedInterfaces := []libapiv3.NodeInterface{
+			{
+				Name:      "eth1",
+				Addresses: []string{"172.31.11.4"},
+			},
+			{
+				Name:      "eth0",
+				Addresses: []string{"172.17.17.10", "172.17.17.11"},
+			},
+		}
 
 		Expect(bgpIpv4Address).To(Equal(ip.String()))
 		Expect(ipInIpAddr).To(Equal(""))
 		Expect(asn.String()).To(Equal("2546"))
+		Expect(nodeInterfaces).To(Equal(parsedInterfaces))
 	})
 
 	It("should ignore RR cluster ID if its an invalid IPv4 address", func() {
@@ -81,21 +94,21 @@ var _ = Describe("Test Node conversion", func() {
 				Name:            "TestNode",
 				ResourceVersion: "1234",
 				Annotations: map[string]string{
-					nodeBgpIpv4AddrAnnotation: "172.17.17.10",
-					nodeBgpCIDAnnotation:      "288.0.4.5",
+					nodeBgpIpv4AddrAnnotation:         "172.17.17.10",
+					RouteReflectorClusterIDAnnotation: "288.0.4.5",
 				},
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "172.17.17.10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "192.168.1.100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "172-17-17-10",
 					},
@@ -118,21 +131,21 @@ var _ = Describe("Test Node conversion", func() {
 				Name:            "TestNode",
 				ResourceVersion: "1234",
 				Annotations: map[string]string{
-					nodeBgpIpv4AddrAnnotation: "172.17.17.10",
-					nodeBgpCIDAnnotation:      "fd10::10",
+					nodeBgpIpv4AddrAnnotation:         "172.17.17.10",
+					RouteReflectorClusterIDAnnotation: "fd10::10",
 				},
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "172.17.17.10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "192.168.1.100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "172-17-17-10",
 					},
@@ -155,22 +168,22 @@ var _ = Describe("Test Node conversion", func() {
 				Name:            "TestNode",
 				ResourceVersion: "1234",
 				Annotations: map[string]string{
-					nodeBgpIpv4AddrAnnotation: "172.17.17.10",
-					nodeBgpAsnAnnotation:      "2546",
-					nodeBgpCIDAnnotation:      "248.0.4.5",
+					nodeBgpIpv4AddrAnnotation:         "172.17.17.10",
+					nodeBgpAsnAnnotation:              "2546",
+					RouteReflectorClusterIDAnnotation: "248.0.4.5",
 				},
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "172.17.17.10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "192.168.1.100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "172-17-17-10",
 					},
@@ -210,15 +223,15 @@ var _ = Describe("Test Node conversion", func() {
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "fd10::10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "fd20::100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "fd10-10",
 					},
@@ -318,6 +331,16 @@ var _ = Describe("Test Node conversion", func() {
 			OrchRefs: []libapiv3.OrchRef{
 				{NodeName: k8sNode.Name, Orchestrator: "k8s"},
 			},
+			Interfaces: []libapiv3.NodeInterface{
+				{
+					Name:      "eth1",
+					Addresses: []string{"172.31.11.4"},
+				},
+				{
+					Name:      "eth0",
+					Addresses: []string{"172.17.17.10", "172.17.17.11"},
+				},
+			},
 		}
 
 		newK8sNode, err := mergeCalicoNodeIntoK8sNode(calicoNode, k8sNode)
@@ -325,7 +348,8 @@ var _ = Describe("Test Node conversion", func() {
 		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpIpv4AddrAnnotation, "172.17.17.10/24"))
 		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpIpv6AddrAnnotation, "aa:bb:cc::ffff/120"))
 		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpAsnAnnotation, "2456"))
-		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpCIDAnnotation, "245.0.0.3"))
+		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(RouteReflectorClusterIDAnnotation, "245.0.0.3"))
+		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeInterfacesAnnotation, "[{\"name\":\"eth1\",\"addresses\":[\"172.31.11.4\"]},{\"name\":\"eth0\",\"addresses\":[\"172.17.17.10\",\"172.17.17.11\"]}]"))
 
 		// The calico node annotations and labels should not have escaped directly into the node annotations
 		// and labels.
@@ -343,8 +367,8 @@ var _ = Describe("Test Node conversion", func() {
 		calicoNodeWithMergedLabels.Annotations[nodeK8sLabelAnnotation] = "{\"net.beta.kubernetes.io/role\":\"control-plane\"}"
 		calicoNodeWithMergedLabels.Labels["net.beta.kubernetes.io/role"] = "control-plane"
 		calicoNodeWithMergedLabels.Spec.Addresses = []libapiv3.NodeAddress{
-			libapiv3.NodeAddress{Address: "172.17.17.10/24", Type: libapiv3.CalicoNodeIP},
-			libapiv3.NodeAddress{Address: "aa:bb:cc::ffff/120", Type: libapiv3.CalicoNodeIP},
+			{Address: "172.17.17.10/24", Type: libapiv3.CalicoNodeIP},
+			{Address: "aa:bb:cc::ffff/120", Type: libapiv3.CalicoNodeIP},
 		}
 		Expect(newCalicoNode.Value).To(Equal(calicoNodeWithMergedLabels))
 	})
@@ -442,15 +466,15 @@ var _ = Describe("Test Node conversion", func() {
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "172.17.17.10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "192.168.1.100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "172-17-17-10",
 					},
@@ -561,7 +585,6 @@ var _ = Describe("Test Node conversion", func() {
 			ipInIpAddr := n.Value.(*libapiv3.Node).Spec.BGP.IPv4IPIPTunnelAddr
 			Expect(ipInIpAddr).To(Equal(""))
 		})
-
 	})
 
 	It("should parse addresses of all types into Calico Node", func() {
@@ -582,15 +605,15 @@ var _ = Describe("Test Node conversion", func() {
 			},
 			Status: k8sapi.NodeStatus{
 				Addresses: []k8sapi.NodeAddress{
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeInternalIP,
 						Address: "172.17.17.10",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeExternalIP,
 						Address: "192.168.1.100",
 					},
-					k8sapi.NodeAddress{
+					{
 						Type:    k8sapi.NodeHostName,
 						Address: "172-17-17-10",
 					},

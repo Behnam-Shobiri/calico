@@ -121,7 +121,7 @@ class TestBase(TestCase):
     def create_namespace(self, ns_name):
         self.cluster.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=ns_name)))
 
-    def deploy(self, image, name, ns, port, replicas=1, svc_type="NodePort", traffic_policy="Local", cluster_ip=None, ipv6=False):
+    def deploy(self, image, name, ns, port, replicas=1, svc_type="NodePort", traffic_policy="Local", cluster_ip=None, ext_ip=None, ipv6=False):
         """
         Creates a deployment and corresponding service with the given
         parameters.
@@ -166,7 +166,7 @@ class TestBase(TestCase):
 
         # Create a service called <name> whose endpoints are the pods
         # with "app": <name>; i.e. those just created above.
-        self.create_service(name, name, ns, port, svc_type, traffic_policy, ipv6=ipv6)
+        self.create_service(name, name, ns, port, svc_type, traffic_policy, ext_ip=ext_ip, ipv6=ipv6)
 
     def wait_for_deployment(self, name, ns):
         """
@@ -176,7 +176,7 @@ class TestBase(TestCase):
         kubectl("-n %s rollout status deployment/%s" % (ns, name))
         kubectl("get pods -n %s -o wide" % ns)
 
-    def create_service(self, name, app, ns, port, svc_type="NodePort", traffic_policy="Local", cluster_ip=None, ipv6=False):
+    def create_service(self, name, app, ns, port, svc_type="NodePort", traffic_policy="Local", cluster_ip=None, ext_ip=None, ipv6=False):
         service = client.V1Service(
             metadata=client.V1ObjectMeta(
                 name=name,
@@ -191,6 +191,8 @@ class TestBase(TestCase):
         )
         if cluster_ip:
           service.spec["clusterIP"] = cluster_ip
+        if ext_ip:
+          service.spec["externalIPs"] = [ext_ip]
         if ipv6:
           service.spec["ipFamilies"] = ["IPv6"]
 
@@ -201,18 +203,18 @@ class TestBase(TestCase):
         logger.debug("Additional Service created. status='%s'" % str(api_response.status))
 
     def wait_until_exists(self, name, resource_type, ns="default"):
-        retry_until_success(kubectl, function_args=["get %s %s -n%s" %
+        retry_until_success(kubectl, function_args=["get %s %s -n %s" %
                                                     (resource_type, name, ns)])
 
     def delete_and_confirm(self, name, resource_type, ns="default"):
         try:
-            kubectl("delete %s %s -n%s" % (resource_type, name, ns))
+            kubectl("delete %s %s -n %s" % (resource_type, name, ns))
         except subprocess.CalledProcessError:
             pass
 
         def is_it_gone_yet(res_name, res_type):
             try:
-                kubectl("get %s %s -n%s" % (res_type, res_name, ns),
+                kubectl("get %s %s -n %s" % (res_type, res_name, ns),
                         logerr=False)
                 raise self.StillThere
             except subprocess.CalledProcessError:

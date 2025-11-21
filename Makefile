@@ -14,7 +14,7 @@ DOCKER_RUN := mkdir -p ./.go-pkg-cache bin $(GOMOD_CACHE) && \
 		-e GOPATH=/go \
 		-e OS=$(BUILDOS) \
 		-e GOOS=$(BUILDOS) \
-		-e GOFLAGS=$(GOFLAGS) \
+		-e "GOFLAGS=$(GOFLAGS)" \
 		-v $(CURDIR):/go/src/github.com/projectcalico/calico:rw \
 		-v $(CURDIR)/.go-pkg-cache:/go-cache:rw \
 		-w /go/src/$(PACKAGE_NAME)
@@ -53,12 +53,14 @@ ci-preflight-checks:
 	$(MAKE) verify-go-mods
 	$(MAKE) check-dockerfiles
 	$(MAKE) check-language
-	$(MAKE) generate
+	$(MAKE) generate SKIP_FIX_CHANGED=true
 	$(MAKE) fix-all
+	$(MAKE) -C networking-calico fmtpy
 	$(MAKE) check-ocp-no-crds
 	$(MAKE) yaml-lint
 	$(MAKE) check-dirty
 	$(MAKE) go-vet
+	$(MAKE) -C networking-calico flake8
 
 check-go-mod:
 	$(DOCKER_GO_BUILD) ./hack/check-go-mod.sh
@@ -66,10 +68,13 @@ check-go-mod:
 go-vet:
 	# Go vet will check that libbpf headers can be found; make sure they're available.
 	$(MAKE) -C felix clone-libbpf
-	$(DOCKER_GO_BUILD) go vet ./...
+	$(DOCKER_GO_BUILD) go vet --tags fvtests ./...
 
 check-dockerfiles:
 	./hack/check-dockerfiles.sh
+
+check-images-availability: bin/crane bin/yq
+	cd ./hack && ./check-images-availability.sh
 
 check-language:
 	./hack/check-language.sh
@@ -90,32 +95,50 @@ protobuf:
 
 generate:
 	$(MAKE) gen-semaphore-yaml
+	$(MAKE) gen-deps-files
 	$(MAKE) protobuf
 	$(MAKE) -C lib gen-files
 	$(MAKE) -C api gen-files
 	$(MAKE) -C libcalico-go gen-files
 	$(MAKE) -C felix gen-files
 	$(MAKE) -C goldmane gen-files
+	$(MAKE) get-operator-crds
 	$(MAKE) gen-manifests
 	$(MAKE) fix-changed
 
 gen-manifests: bin/helm bin/yq
-	cd ./manifests && \
-		OPERATOR_VERSION=$(OPERATOR_VERSION) \
-		CALICO_VERSION=$(CALICO_VERSION) \
-		./generate.sh
+	cd ./manifests && ./generate.sh
 
 # Get operator CRDs from the operator repo, OPERATOR_BRANCH must be set
-get-operator-crds: var-require-all-OPERATOR_BRANCH
-	@echo ================================================================
-	@echo === Pulling new operator CRDs from branch $(OPERATOR_BRANCH) ===
-	@echo ================================================================
+get-operator-crds: var-require-all-OPERATOR_ORGANIZATION-OPERATOR_GIT_REPO-OPERATOR_BRANCH
+	@echo ==============================================================================================================
+	@echo === Pulling new operator CRDs from $(OPERATOR_ORGANIZATION)/$(OPERATOR_GIT_REPO) branch $(OPERATOR_BRANCH) ===
+	@echo ==============================================================================================================
 	cd ./charts/tigera-operator/crds/ && \
-	for file in operator.tigera.io_*.yaml; do echo "downloading $$file from operator repo" && curl -fsSL https://raw.githubusercontent.com/tigera/operator/$(OPERATOR_BRANCH)/pkg/crds/operator/$${file} -o $${file}; done
+	for file in operator.tigera.io_*.yaml; do \
+		echo "downloading $$file from operator repo"; \
+		curl -fsSL https://raw.githubusercontent.com/$(OPERATOR_ORGANIZATION)/$(OPERATOR_GIT_REPO)/$(OPERATOR_BRANCH)/pkg/crds/operator/$${file} -o $${file}; \
+	done
 	$(MAKE) fix-changed
 
 gen-semaphore-yaml:
-	cd .semaphore && ./generate-semaphore-yaml.sh
+	$(DOCKER_GO_BUILD) sh -c "go run ./hack/cmd/deps generate-semaphore-yamls"
+
+GO_DIRS=$(shell find -name '*.go' | grep -v -e './lib/' -e './pkg/' | grep -o --perl '^./\K[^/]+' | sort -u)
+DEP_FILES=$(patsubst %, %/deps.txt, $(GO_DIRS))
+
+gen-deps-files:
+	$(MAKE) -j $(DEP_FILES)
+
+$(DEP_FILES): go.mod go.sum $(shell find . -name '*.go') Makefile hack/cmd/deps/*
+	@{ \
+	  echo "!!! GENERATED FILE, DO NOT EDIT !!!" && \
+	  echo "This file contains the list of modules that this package depends on" && \
+	  echo "in order to trigger CI on changes" && \
+	  echo && \
+	  grep '^go' go.mod && \
+	  $(DOCKER_GO_BUILD) sh -c "go run ./hack/cmd/deps modules $(dir $@)"; \
+	} > $@
 
 # Build the tigera-operator helm chart.
 chart: bin/tigera-operator-$(GIT_VERSION).tgz
@@ -141,23 +164,24 @@ image:
 # Run local e2e smoke test against the checked-out code
 # using a local kind cluster.
 ###############################################################################
-E2E_FOCUS ?= "sig-network.*Conformance"
-ADMINPOLICY_SUPPORTED_FEATURES ?= "AdminNetworkPolicy,BaselineAdminNetworkPolicy"
-ADMINPOLICY_UNSUPPORTED_FEATURES ?= ""
+E2E_FOCUS ?= "sig-network.*Conformance|sig-calico.*Conformance|BGP"
+E2E_SKIP ?= ""
+K8S_NETPOL_SUPPORTED_FEATURES ?= "ClusterNetworkPolicy"
+K8S_NETPOL_UNSUPPORTED_FEATURES ?= "AdminNetworkPolicy,BaselineAdminNetworkPolicy"
 e2e-test:
 	$(MAKE) -C e2e build
 	$(MAKE) -C node kind-k8st-setup
-	KUBECONFIG=$(KIND_KUBECONFIG) ./e2e/bin/k8s/e2e.test -ginkgo.focus=$(E2E_FOCUS)
-	KUBECONFIG=$(KIND_KUBECONFIG) ./e2e/bin/adminpolicy/e2e.test \
-	  -exempt-features=$(ADMINPOLICY_UNSUPPORTED_FEATURES) \
-	  -supported-features=$(ADMINPOLICY_SUPPORTED_FEATURES)
+	KUBECONFIG=$(KIND_KUBECONFIG) ./e2e/bin/k8s/e2e.test -ginkgo.focus=$(E2E_FOCUS) -ginkgo.skip=$(E2E_SKIP)
+	KUBECONFIG=$(KIND_KUBECONFIG) ./e2e/bin/clusternetworkpolicy/e2e.test \
+	  -exempt-features=$(K8S_NETPOL_UNSUPPORTED_FEATURES) \
+	  -supported-features=$(K8S_NETPOL_SUPPORTED_FEATURES)
 
-e2e-test-adminpolicy:
+e2e-test-clusternetworkpolicy:
 	$(MAKE) -C e2e build
 	$(MAKE) -C node kind-k8st-setup
-	KUBECONFIG=$(KIND_KUBECONFIG) ./e2e/bin/adminpolicy/e2e.test \
-	  -exempt-features=$(ADMINPOLICY_UNSUPPORTED_FEATURES) \
-	  -supported-features=$(ADMINPOLICY_SUPPORTED_FEATURES)
+	KUBECONFIG=$(KIND_KUBECONFIG) ./e2e/bin/clusternetworkpolicy/e2e.test \
+	  -exempt-features=$(K8S_NETPOL_UNSUPPORTED_FEATURES) \
+	  -supported-features=$(K8S_NETPOL_SUPPORTED_FEATURES)
 
 ###############################################################################
 # Release logic below
@@ -191,7 +215,7 @@ release-public: bin/gh release/bin/release
 
 # Create a release branch.
 create-release-branch: release/bin/release
-	@release/bin/release branch cut -git-publish
+	@release/bin/release branch cut
 
 # Test the release code
 release-test:

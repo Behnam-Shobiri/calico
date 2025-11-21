@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2022 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	tcdefs "github.com/projectcalico/calico/felix/bpf/tc/defs"
+	"github.com/projectcalico/calico/felix/dataplane/linux/dataplanedefs"
 	"github.com/projectcalico/calico/felix/generictables"
 	"github.com/projectcalico/calico/felix/nftables"
 	"github.com/projectcalico/calico/felix/proto"
@@ -474,7 +475,7 @@ func (r *DefaultRuleRenderer) filterWorkloadToHostChain(ipVersion uint8) *generi
 func (r *DefaultRuleRenderer) failsafeInChain(table string, ipVersion uint8) *generictables.Chain {
 	rules := []generictables.Rule{}
 
-	for _, protoPort := range r.Config.FailsafeInboundHostPorts {
+	for _, protoPort := range r.FailsafeInboundHostPorts {
 		rule := generictables.Rule{
 			Match: r.NewMatch().
 				Protocol(protoPort.Protocol).
@@ -505,7 +506,7 @@ func (r *DefaultRuleRenderer) failsafeInChain(table string, ipVersion uint8) *ge
 		// Otherwise, it could fall through to some doNotTrack policy and half of the connection
 		// would get untracked.  If we ACCEPT here then the traffic falls through to the filter
 		// table, where it'll only be accepted if there's a conntrack entry.
-		for _, protoPort := range r.Config.FailsafeOutboundHostPorts {
+		for _, protoPort := range r.FailsafeOutboundHostPorts {
 			rule := generictables.Rule{
 				Match: r.NewMatch().
 					Protocol(protoPort.Protocol).
@@ -541,7 +542,7 @@ func (r *DefaultRuleRenderer) failsafeInChain(table string, ipVersion uint8) *ge
 func (r *DefaultRuleRenderer) failsafeOutChain(table string, ipVersion uint8) *generictables.Chain {
 	rules := []generictables.Rule{}
 
-	for _, protoPort := range r.Config.FailsafeOutboundHostPorts {
+	for _, protoPort := range r.FailsafeOutboundHostPorts {
 		rule := generictables.Rule{
 			Match: r.NewMatch().
 				Protocol(protoPort.Protocol).
@@ -572,7 +573,7 @@ func (r *DefaultRuleRenderer) failsafeOutChain(table string, ipVersion uint8) *g
 		// Otherwise, it could fall through to some doNotTrack policy and half of the connection
 		// would get untracked.  If we ACCEPT here then the traffic falls through to the filter
 		// table, where it'll only be accepted if there's a conntrack entry.
-		for _, protoPort := range r.Config.FailsafeInboundHostPorts {
+		for _, protoPort := range r.FailsafeInboundHostPorts {
 			rule := generictables.Rule{
 				Match: r.NewMatch().
 					Protocol(protoPort.Protocol).
@@ -920,13 +921,13 @@ func (r *DefaultRuleRenderer) StaticNATPostroutingChains(ipVersion uint8) []*gen
 	var tunnelIfaces []string
 
 	if ipVersion == 4 && r.IPIPEnabled && len(r.IPIPTunnelAddress) > 0 {
-		tunnelIfaces = append(tunnelIfaces, "tunl0")
+		tunnelIfaces = append(tunnelIfaces, dataplanedefs.IPIPIfaceName)
 	}
 	if ipVersion == 4 && r.VXLANEnabled && len(r.VXLANTunnelAddress) > 0 {
-		tunnelIfaces = append(tunnelIfaces, "vxlan.calico")
+		tunnelIfaces = append(tunnelIfaces, dataplanedefs.VXLANIfaceNameV4)
 	}
 	if ipVersion == 6 && r.VXLANEnabledV6 && len(r.VXLANTunnelAddressV6) > 0 {
-		tunnelIfaces = append(tunnelIfaces, "vxlan-v6.calico")
+		tunnelIfaces = append(tunnelIfaces, dataplanedefs.VXLANIfaceNameV6)
 	}
 	if ipVersion == 4 && r.WireguardEnabled && len(r.WireguardInterfaceName) > 0 {
 		// Wireguard is assigned an IP dynamically and without restarting Felix. Just add the interface if we have
@@ -1063,6 +1064,23 @@ func (r *DefaultRuleRenderer) StaticManglePostroutingChain(ipVersion uint8) *gen
 	// Note, we use RETURN as the Allow action in this chain, rather than ACCEPT because the
 	// mangle table is typically used, if at all, for packet manipulations that might need to
 	// apply to our allowed traffic.
+
+	if !r.BPFEnabled {
+		ipConf := r.ipSetConfig(ipVersion)
+		allIPsSetName := ipConf.NameForMainIPSet(IPSetIDAllPools)
+		localHostSetName := ipConf.NameForMainIPSet(IPSetIDThisHostIPs)
+		dscpSetName := ipConf.NameForMainIPSet(IPSetIDDSCPEndpoints)
+		rules = append(
+			rules, generictables.Rule{
+				Match: r.NewMatch().
+					SourceIPSet(dscpSetName).
+					NotDestIPSet(allIPsSetName).
+					NotDestIPSet(localHostSetName),
+				Action:  r.Jump(ChainEgressDSCP),
+				Comment: []string{"set dscp for traffic leaving cluster."},
+			},
+		)
+	}
 
 	// Allow immediately if IptablesMarkAccept is set.  Our filter-FORWARD chain sets this for
 	// any packets that reach the end of that chain.  The principle is that we don't want to
@@ -1304,7 +1322,7 @@ func (r *DefaultRuleRenderer) StaticRawPreroutingChain(ipVersion uint8) *generic
 	)
 
 	// Set a mark on encapsulated packets coming from WireGuard to ensure the RPF check allows it
-	if ((r.WireguardEnabled && len(r.WireguardInterfaceName) > 0) || (r.WireguardEnabledV6 && len(r.WireguardInterfaceNameV6) > 0)) && r.Config.WireguardEncryptHostTraffic {
+	if ((r.WireguardEnabled && len(r.WireguardInterfaceName) > 0) || (r.WireguardEnabledV6 && len(r.WireguardInterfaceNameV6) > 0)) && r.WireguardEncryptHostTraffic {
 		log.Debug("Adding Wireguard iptables rule")
 		rules = append(rules, generictables.Rule{
 			Match:  nil,

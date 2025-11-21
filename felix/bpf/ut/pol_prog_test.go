@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
@@ -2217,7 +2219,7 @@ func denyDest(name, dst string) []polprog.Policy {
 }
 
 // polProgramTestWrapper allows to keep polProgramTest intact as well as the tests that
-// use it. The wrapped object satisfies testCase interface that allows to use the same
+// use it. The wrapped object satisfies testPolicy interface that allows to use the same
 // algo for testing with different testcase options.
 type polProgramTestWrapper struct {
 	p polProgramTest
@@ -2266,6 +2268,22 @@ func (w polProgramTestWrapper) ForIPv6() bool {
 	return w.p.ForIPv6
 }
 
+func (w polProgramTestWrapper) Setup() error {
+	if w.p.SetupCB != nil {
+		return w.p.SetupCB()
+	}
+
+	return nil
+}
+
+func (w polProgramTestWrapper) TearDown() error {
+	if w.p.TearDownCB != nil {
+		return w.p.TearDownCB()
+	}
+
+	return nil
+}
+
 func wrap(p polProgramTest) polProgramTestWrapper {
 	return polProgramTestWrapper{p}
 }
@@ -2289,10 +2307,16 @@ func TestExpandedPolicyPrograms(t *testing.T) {
 					defer log.SetLevel(logLevel)
 					log.SetLevel(log.InfoLevel)
 
-					runTest(t, wrap(expandedP))
+					runTest(t, wrap(expandedP), expandedP.Options...)
 				})
 		}
 	}
+}
+
+func execSysctl(param, value string) error {
+	cmd := exec.Command("sysctl", "-w", fmt.Sprintf("%s=%s", param, value))
+	_, err := cmd.CombinedOutput()
+	return err
 }
 
 var testExpanders = []testExpander{
@@ -2450,6 +2474,9 @@ func (t testFlowLog) DroppedPackets() []testCase {
 func (t testFlowLog) IPSets() map[string][]string {
 	return t.ipSets
 }
+
+func (testFlowLog) Setup() error    { return nil }
+func (testFlowLog) TearDown() error { return nil }
 
 func TestPolicyProgramsExceedMatchIdSpace(t *testing.T) {
 	test := testFlowLog{
@@ -2666,6 +2693,9 @@ type polProgramTest struct {
 	UnmatchedPackets []packet
 	IPSets           map[string][]string
 	ForIPv6          bool
+	SetupCB          func() error
+	TearDownCB       func() error
+	Options          []polprog.Option
 }
 
 type packet struct {
@@ -2824,6 +2854,8 @@ type testPolicy interface {
 	UnmatchedPackets() []testCase
 	XDP() bool
 	ForIPv6() bool
+	Setup() error
+	TearDown() error
 }
 
 type testCase interface {
@@ -2833,9 +2865,18 @@ type testCase interface {
 }
 
 var nextPolProgIdx atomic.Int64
+var jumpStride = asm.TrampolineStrideDefault
 
 func runTest(t *testing.T, tp testPolicy, polprogOpts ...polprog.Option) {
 	RegisterTestingT(t)
+
+	err := tp.Setup()
+	Expect(err).NotTo(HaveOccurred())
+
+	defer func() {
+		err := tp.TearDown()
+		Expect(err).NotTo(HaveOccurred())
+	}()
 
 	// The prog builder refuses to allocate IDs as a precaution, give it an allocator that forces allocations.
 	realAlloc := idalloc.New()
@@ -2856,7 +2897,7 @@ func runTest(t *testing.T, tp testPolicy, polprogOpts ...polprog.Option) {
 	}
 	policyJumpMap = jump.Map()
 	_ = unix.Unlink(policyJumpMap.Path())
-	err := policyJumpMap.EnsureExists()
+	err = policyJumpMap.EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
 
 	allowIdx := tcdefs.ProgIndexAllowed
@@ -2882,6 +2923,10 @@ func runTest(t *testing.T, tp testPolicy, polprogOpts ...polprog.Option) {
 	polProgIdx := int(nextPolProgIdx.Add(1))
 	stride := jump.TCMaxEntryPoints
 	polprogOpts = append(polprogOpts, polprog.WithPolicyMapIndexAndStride(int(polProgIdx), stride))
+
+retry:
+	polprogOpts = append(polprogOpts, polprog.WithTrampolineStride(jumpStride))
+
 	if tp.ForIPv6() {
 		polprogOpts = append(polprogOpts, polprog.WithIPv6())
 		ipsfd = ipsMapV6.MapFD()
@@ -2911,6 +2956,10 @@ func runTest(t *testing.T, tp testPolicy, polprogOpts ...polprog.Option) {
 	}()
 	for i, p := range insns {
 		polProgFD, err := bpf.LoadBPFProgramFromInsns(p, "calico_policy", "Apache-2.0", unix.BPF_PROG_TYPE_SCHED_CLS)
+		if err != nil && errors.Is(err, unix.ERANGE) && jumpStride == asm.TrampolineStrideDefault {
+			jumpStride = 14000
+			goto retry
+		}
 		Expect(err).NotTo(HaveOccurred(), "failed to load program into the kernel")
 		Expect(polProgFD).NotTo(BeZero())
 		polProgFDs = append(polProgFDs, polProgFD)

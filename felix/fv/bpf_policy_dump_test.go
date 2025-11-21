@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build fvtests
-
 package fv_test
 
 import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -59,19 +58,13 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ Felix bpf test policy dump"
 			w[i].WorkloadEndpoint.Labels = map[string]string{"name": w[i].Name}
 			w[i].ConfigureInInfra(infra)
 		}
-
+		ensureAllNodesBPFProgramsAttached(tc.Felixes)
 	})
 
 	AfterEach(func() {
 		if CurrentGinkgoTestDescription().Failed {
-			infra.DumpErrorData()
+			tc.Felixes[0].Exec("calico-bpf", "policy", "dump", w[0].InterfaceName, "all")
 		}
-
-		for i := 0; i < 2; i++ {
-			w[i].Stop()
-		}
-		tc.Stop()
-		infra.Stop()
 	})
 
 	createPolicy := func(policy *api.GlobalNetworkPolicy) *api.GlobalNetworkPolicy {
@@ -95,6 +88,7 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ Felix bpf test policy dump"
 		protoTCP := numorstring.ProtocolFromString(numorstring.ProtocolTCP)
 		protoUDP := numorstring.ProtocolFromString(numorstring.ProtocolUDP)
 		sportRange, err := numorstring.PortFromRange(100, 105)
+		Expect(err).NotTo(HaveOccurred())
 		dportRange, err := numorstring.PortFromRange(200, 205)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -117,18 +111,30 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ Felix bpf test policy dump"
 			out, err = tc.Felixes[0].ExecOutput("calico-bpf", "policy", "dump", w[0].InterfaceName, "ingress")
 			Expect(err).NotTo(HaveOccurred())
 			return out
-		}, "5s", "200ms").Should(ContainSubstring("Start of policy default.policy-tcp"))
+		}, "10s", "200ms").Should(And(
+			ContainSubstring("Start of policy default.policy-tcp"),
+			ContainSubstring("IPSets src_ip_set_ids"),
+		))
 
-		outStr := string(out)
+		outStr := out
 		Expect(outStr).To(ContainSubstring("Start of rule action:\"allow\""))
 		Expect(outStr).To(ContainSubstring("IPSets src_ip_set_ids:"))
 		re := regexp.MustCompile("0x[0-9a-fA-F]+")
-		ipsetStr := re.FindAllString(outStr, -1)
-
-		// IPSet ID is 64bit.
-		Expect(len(ipsetStr)).To(Equal(1))
-		Expect(len(ipsetStr[0])).To(Equal(18))
-
+		ipSetFound := false
+		for _, tmp := range strings.Split(outStr, "\n") {
+			if strings.Contains(tmp, "IPSets src_ip_set_ids:") {
+				log.WithField("line", tmp).Info("Examining line for IPSet ID")
+				ipsetStr := re.FindAllString(tmp, -1)
+				Expect(len(ipsetStr)).To(Equal(1))
+				// IPSet ID is 64bit.
+				log.WithField("ipsetStr", ipsetStr[0]).Info("Found IPSet ID")
+				Expect(len(ipsetStr[0])).To(BeNumerically("<=", 18), "IPSet ID should be 64bit, not "+ipsetStr[0])
+				// Vanishingly unlikely to be less than 10 characters.
+				Expect(len(ipsetStr[0])).To(BeNumerically(">", 10), "IPSet ID should be 64bit, not "+ipsetStr[0])
+				ipSetFound = true
+			}
+		}
+		Expect(ipSetFound).To(BeTrue(), fmt.Sprintf("IP set was missing in output: %q", out))
 		// check ingress policy dump with eBPF assembler code
 		Eventually(func() string {
 			out, err = tc.Felixes[0].ExecOutput("calico-bpf", "policy", "dump", w[0].InterfaceName, "ingress", "-a")
@@ -157,12 +163,22 @@ var _ = infrastructure.DatastoreDescribe("_BPF-SAFE_ Felix bpf test policy dump"
 		}, "5s", "200ms").Should(ContainSubstring("Start of policy default.policy-tcp"))
 
 		outStr = string(out)
-		ipsetStr = re.FindAllString(outStr, -1)
 		Expect(outStr).To(ContainSubstring("Start of rule action:\"deny\""))
-		Expect(outStr).To(ContainSubstring("IPSets not_dst_ip_set_ids:"))
-		// IPSet ID is 64bit.
-		Expect(len(ipsetStr)).To(Equal(1))
-		Expect(len(ipsetStr[0])).To(Equal(18))
+		ipSetFound = false
+		for _, tmp := range strings.Split(outStr, "\n") {
+			if strings.Contains(tmp, "IPSets not_dst_ip_set_ids:") {
+				log.WithField("line", tmp).Info("Examining line for IPSet ID")
+				ipsetStr := re.FindAllString(tmp, -1)
+				Expect(len(ipsetStr)).To(Equal(1))
+				// IPSet ID is 64bit.
+				log.WithField("ipsetStr", ipsetStr[0]).Info("Found IPSet ID")
+				Expect(len(ipsetStr[0])).To(BeNumerically("<=", 18), "IPSet ID should be 64bit, not "+ipsetStr[0])
+				// Vanishingly unlikely to be less than 10 characters.
+				Expect(len(ipsetStr[0])).To(BeNumerically(">", 10), "IPSet ID should be 64bit, not "+ipsetStr[0])
+				ipSetFound = true
+			}
+		}
+		Expect(ipSetFound).To(BeTrue())
 
 		Eventually(func() string {
 			out, err = tc.Felixes[0].ExecOutput("calico-bpf", "policy", "dump", w[0].InterfaceName, "egress", "-a")

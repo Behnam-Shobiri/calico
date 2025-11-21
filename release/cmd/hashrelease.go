@@ -15,12 +15,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/sirupsen/logrus"
-	cli "github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v3"
 
 	"github.com/projectcalico/calico/release/internal/ci"
 	"github.com/projectcalico/calico/release/internal/hashreleaseserver"
@@ -43,11 +44,11 @@ func baseHashreleaseOutputDir(repoRootDir string) string {
 // as well as to interact with the hashrelease server.
 func hashreleaseCommand(cfg *Config) *cli.Command {
 	return &cli.Command{
-		Name:        "hashrelease",
-		Aliases:     []string{"hr"},
-		Usage:       "Build and publish hashreleases.",
-		Flags:       hashreleaseServerFlags,
-		Subcommands: hashreleaseSubCommands(cfg),
+		Name:     "hashrelease",
+		Aliases:  []string{"hr"},
+		Usage:    "Build and publish hashreleases.",
+		Flags:    hashreleaseServerFlags,
+		Commands: hashreleaseSubCommands(cfg),
 	}
 }
 
@@ -58,7 +59,7 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 			Name:  "build",
 			Usage: "Build a hashrelease locally",
 			Flags: hashreleaseBuildFlags(),
-			Action: func(c *cli.Context) error {
+			Action: func(_ context.Context, c *cli.Command) error {
 				configureLogging("hashrelease-build.log")
 
 				// Validate flags.
@@ -101,26 +102,36 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 				if published, err := tasks.HashreleasePublished(hashreleaseServerConfig(c), data.Hash(), c.Bool(ciFlag.Name)); err != nil {
 					return fmt.Errorf("failed to check if hashrelease has been published: %v", err)
 				} else if published {
-					// On CI, we want it to fail if the hashrelease has already been published.
+					// On CI, if the hashrelease has already been published, we exit successfully (return nil).
 					// However, on local builds, we just log a warning and continue.
 					if c.Bool(ciFlag.Name) {
-						return fmt.Errorf("hashrelease %s has already been published", data.Hash())
+						logrus.Infof("hashrelease %s has already been published", data.Hash())
+						return nil
 					} else {
 						logrus.Warnf("hashrelease %s has already been published", data.Hash())
 					}
 				}
+
+				productRegistriesFromFlag := c.StringSlice(registryFlag.Name)
 
 				// Build the operator
 				operatorOpts := []operator.Option{
 					operator.WithOperatorDirectory(operatorDir),
 					operator.WithReleaseBranchPrefix(c.String(operatorReleaseBranchPrefixFlag.Name)),
 					operator.IsHashRelease(),
+					operator.WithImage(c.String(operatorImageFlag.Name)),
 					operator.WithArchitectures(c.StringSlice(archFlag.Name)),
 					operator.WithValidate(!c.Bool(skipValidationFlag.Name)),
 					operator.WithReleaseBranchValidation(!c.Bool(skipBranchCheckFlag.Name)),
 					operator.WithVersion(data.OperatorVersion()),
 					operator.WithCalicoDirectory(cfg.RepoRootDir),
 					operator.WithTempDirectory(cfg.TmpDir),
+				}
+				if reg := c.String(operatorRegistryFlag.Name); reg != "" {
+					operatorOpts = append(operatorOpts, operator.WithRegistry(reg))
+				}
+				if len(productRegistriesFromFlag) > 0 {
+					operatorOpts = append(operatorOpts, operator.WithProductRegistry(productRegistriesFromFlag[0]))
 				}
 				if !c.Bool(skipOperatorFlag.Name) {
 					o := operator.NewManager(operatorOpts...)
@@ -135,11 +146,14 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 				opts := []calico.Option{
 					calico.WithVersion(data.ProductVersion()),
 					calico.WithOperator(c.String(operatorRegistryFlag.Name), c.String(operatorImageFlag.Name), data.OperatorVersion()),
+					calico.WithOperatorGit(c.String(operatorOrgFlag.Name), c.String(operatorRepoFlag.Name), c.String(operatorBranchFlag.Name)),
 					calico.WithRepoRoot(cfg.RepoRootDir),
 					calico.WithReleaseBranchPrefix(c.String(releaseBranchPrefixFlag.Name)),
 					calico.IsHashRelease(),
 					calico.WithOutputDir(hashreleaseDir),
-					calico.WithBuildImages(c.Bool(buildHashreleaseImageFlag.Name)),
+					calico.WithTmpDir(cfg.TmpDir),
+					calico.WithBuildImages(c.Bool(buildHashreleaseImagesFlag.Name)),
+					calico.WithArchiveImages(c.Bool(archiveHashreleaseImagesFlag.Name)),
 					calico.WithValidate(!c.Bool(skipValidationFlag.Name)),
 					calico.WithReleaseBranchValidation(!c.Bool(skipBranchCheckFlag.Name)),
 					calico.WithGithubOrg(c.String(orgFlag.Name)),
@@ -147,10 +161,9 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithRepoRemote(c.String(repoRemoteFlag.Name)),
 					calico.WithArchitectures(c.StringSlice(archFlag.Name)),
 				}
-				if reg := c.StringSlice(registryFlag.Name); len(reg) > 0 {
-					opts = append(opts, calico.WithImageRegistries(reg))
+				if len(productRegistriesFromFlag) > 0 {
+					opts = append(opts, calico.WithImageRegistries(productRegistriesFromFlag))
 				}
-
 				r := calico.NewManager(opts...)
 				if err := r.Build(); err != nil {
 					return err
@@ -180,7 +193,7 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 			Name:  "publish",
 			Usage: "Publish a pre-built hashrelease",
 			Flags: hashreleasePublishFlags(),
-			Action: func(c *cli.Context) error {
+			Action: func(_ context.Context, c *cli.Command) error {
 				configureLogging("hashrelease-publish.log")
 
 				// Validate flags.
@@ -199,7 +212,14 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 				if published, err := tasks.HashreleasePublished(serverCfg, hashrel.Hash, c.Bool(ciFlag.Name)); err != nil {
 					return fmt.Errorf("failed to check if hashrelease has been published: %v", err)
 				} else if published {
-					return fmt.Errorf("%s hashrelease (%s) has already been published", hashrel.Name, hashrel.Hash)
+					// On CI, we exit successfully (return nil) if the hashrelease has already been published.
+					// This is not an error scenario; we just log a warning and continue locally.
+					if c.Bool(ciFlag.Name) {
+						logrus.Infof("hashrelease %s has already been published", hashrel.Hash)
+						return nil
+					} else {
+						logrus.Warnf("hashrelease %s has already been published", hashrel.Hash)
+					}
 				}
 
 				// Push the operator hashrelease first before validaion
@@ -228,34 +248,37 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithValidate(!c.Bool(skipValidationFlag.Name)),
 					calico.WithTmpDir(cfg.TmpDir),
 					calico.WithHashrelease(*hashrel, *serverCfg),
-					calico.WithPublishImages(c.Bool(publishHashreleaseImageFlag.Name)),
+					calico.WithPublishImages(c.Bool(publishHashreleaseImagesFlag.Name)),
 					calico.WithPublishHashrelease(c.Bool(publishHashreleaseFlag.Name)),
-					calico.WithImageScanning(!c.Bool(skipImageScanFlag.Name), *imageScanningAPIConfig(c)),
 				}
 				if reg := c.StringSlice(registryFlag.Name); len(reg) > 0 {
-					opts = append(opts, calico.WithImageRegistries(reg))
+					opts = append(opts,
+						calico.WithImageRegistries(reg),
+						calico.WithImageScanning(false, imagescanner.Config{}), // Disable image scanning if using custom registries.
+					)
+				} else {
+					opts = append(opts, calico.WithImageScanning(!c.Bool(skipImageScanFlag.Name), *imageScanningAPIConfig(c)))
 				}
-				// Note: We only need to check that the correct images exist if we haven't built them ourselves.
-				// So, skip this check if we're configured to build and publish images from the local codebase.
-				if !c.Bool(publishHashreleaseImageFlag.Name) {
-					components, err := pinnedversion.RetrieveImageComponents(cfg.TmpDir)
-					if err != nil {
-						return fmt.Errorf("failed to retrieve images for the hashrelease: %v", err)
-					}
-					opts = append(opts, calico.WithComponents(components))
+				components, err := pinnedversion.RetrieveImageComponents(cfg.TmpDir)
+				if err != nil {
+					return fmt.Errorf("failed to retrieve images for hashrelease: %w", err)
 				}
+				opts = append(opts, calico.WithComponents(components))
 				r := calico.NewManager(opts...)
 				if err := r.PublishRelease(); err != nil {
 					return err
 				}
 
 				if !c.Bool(skipImageScanFlag.Name) {
-					hashrel.ImageScanResultURL, err = imagescanner.RetrieveResultURL(cfg.TmpDir)
+					url, err := imagescanner.RetrieveResultURL(cfg.TmpDir)
 					// Only log error as a warning if the image scan result URL could not be retrieved
 					// as it is not an error that should stop the hashrelease process.
 					if err != nil {
 						logrus.WithError(err).Warn("Failed to retrieve image scan result URL")
+					} else if url == "" {
+						logrus.Warn("Image scan result URL is empty")
 					}
+					hashrel.ImageScanResultURL = url
 				}
 
 				// Send a slack message to notify that the hashrelease has been published.
@@ -265,22 +288,6 @@ func hashreleaseSubCommands(cfg *Config) []*cli.Command {
 				return nil
 			},
 		},
-
-		hashreleaseGarbageCollectCommand(cfg),
-	}
-}
-
-// hashreleaseGarbageCollectCommand is used to clean up older hashreleases from the hashrelease server.
-func hashreleaseGarbageCollectCommand(cfg *Config) *cli.Command {
-	return &cli.Command{
-		Name:    "garbage-collect",
-		Usage:   "Clean up older hashreleases",
-		Aliases: []string{"gc"},
-		Flags:   []cli.Flag{maxHashreleasesFlag},
-		Action: func(c *cli.Context) error {
-			configureLogging("hashrelease-garbage-collect.log")
-			return hashreleaseserver.CleanOldHashreleases(hashreleaseServerConfig(c), c.Int(maxHashreleasesFlag.Name))
-		},
 	}
 }
 
@@ -288,36 +295,44 @@ func hashreleaseGarbageCollectCommand(cfg *Config) *cli.Command {
 func hashreleaseBuildFlags() []cli.Flag {
 	f := append(productFlags,
 		registryFlag,
+		buildHashreleaseImagesFlag,
+		archiveHashreleaseImagesFlag,
 		archFlag)
 	f = append(f, operatorBuildFlags...)
 	f = append(f,
 		skipOperatorFlag,
 		skipBranchCheckFlag,
 		skipValidationFlag,
-		buildHashreleaseImageFlag,
 		githubTokenFlag)
 	return f
 }
 
 // validateHashreleaseBuildFlags checks that the flags are set correctly for the hashrelease build command.
-func validateHashreleaseBuildFlags(c *cli.Context) error {
+func validateHashreleaseBuildFlags(c *cli.Command) error {
 	// If using a custom registry for product, ensure operator is also using a custom registry.
 	if len(c.StringSlice(registryFlag.Name)) > 0 && c.String(operatorRegistryFlag.Name) == "" {
 		return fmt.Errorf("%s must be set if %s is set", operatorRegistryFlag, registryFlag)
 	}
 
-	// CI condtional checks.
+	if c.Bool(archiveHashreleaseImagesFlag.Name) && !c.Bool(buildHashreleaseImagesFlag.Name) {
+		return fmt.Errorf("cannot archive images without building them; set --%s to 'true'", buildHashreleaseImagesFlag.Name)
+	}
+	if !c.Bool(archiveHashreleaseImagesFlag.Name) && c.Bool(buildHashreleaseImagesFlag.Name) {
+		logrus.Warnf("Images are built but not archived; to archive images set --%s to 'true'", archiveHashreleaseImagesFlag.Name)
+	}
+
+	// CI conditional checks.
 	if c.Bool(ciFlag.Name) {
 		if !hashreleaseServerConfig(c).Valid() {
-			return fmt.Errorf("missing hashrelease server configuration, must set %s, %s, %s, %s, and %s",
-				sshHostFlag, sshUserFlag, sshKeyFlag, sshPortFlag, sshKnownHostsFlag)
+			return fmt.Errorf("missing hashrelease publishing configuration, ensure --%s is set",
+				hashreleaseServerBucketFlag.Name)
 		}
 		if c.String(ciTokenFlag.Name) == "" {
 			return fmt.Errorf("%s API token must be set when running on CI, either set \"SEMAPHORE_API_TOKEN\" or use %s flag", semaphoreCI, ciTokenFlag.Name)
 		}
 	} else {
 		// If building images, log a warning if no registry is specified.
-		if c.Bool(buildHashreleaseImageFlag.Name) && len(c.StringSlice(registryFlag.Name)) == 0 {
+		if c.Bool(buildHashreleaseImagesFlag.Name) && len(c.StringSlice(registryFlag.Name)) == 0 {
 			logrus.Warn("Building images without specifying a registry will result in images being built with the default registries")
 		}
 
@@ -334,8 +349,8 @@ func validateHashreleaseBuildFlags(c *cli.Context) error {
 func hashreleasePublishFlags() []cli.Flag {
 	f := append(gitFlags,
 		registryFlag,
+		publishHashreleaseImagesFlag,
 		archFlag,
-		publishHashreleaseImageFlag,
 		publishHashreleaseFlag,
 		latestFlag,
 		skipOperatorFlag,
@@ -346,16 +361,24 @@ func hashreleasePublishFlags() []cli.Flag {
 }
 
 // validateHashreleasePublishFlags checks that the flags are set correctly for the hashrelease publish command.
-func validateHashreleasePublishFlags(c *cli.Context) error {
-	// If publishing the hashrelease, then the hashrelease server configuration must be set.
-	if c.Bool(publishHashreleaseFlag.Name) && !hashreleaseServerConfig(c).Valid() {
-		return fmt.Errorf("missing hashrelease server configuration, must set %s, %s, %s, %s, and %s",
-			sshHostFlag, sshUserFlag, sshKeyFlag, sshPortFlag, sshKnownHostsFlag)
-	}
-
-	// If using a custom registry, do not allow setting the hashrelease as latest.
-	if len(c.StringSlice(registryFlag.Name)) > 0 && c.Bool(latestFlag.Name) {
-		return fmt.Errorf("cannot set hashrelease as latest when using a custom registry")
+func validateHashreleasePublishFlags(c *cli.Command) error {
+	// If publishing the hashrelease
+	if c.Bool(publishHashreleaseFlag.Name) {
+		//  check that hashrelease server configuration is set.
+		if !hashreleaseServerConfig(c).Valid() {
+			return fmt.Errorf("missing hashrelease publishing configuration, ensure --%s is set",
+				hashreleaseServerBucketFlag.Name)
+		}
+		if c.Bool(latestFlag.Name) {
+			// If using a custom registry, do not allow setting the hashrelease as latest.
+			if len(c.StringSlice(registryFlag.Name)) > 0 {
+				return fmt.Errorf("cannot set hashrelease as latest when using a custom registry")
+			}
+			// If building locally, do not allow setting the hashrelease as latest.
+			if !c.Bool(ciFlag.Name) {
+				return fmt.Errorf("cannot set hashrelease as latest when building locally, use --%s=false instead", latestFlag.Name)
+			}
+		}
 	}
 
 	// If skipValidationFlag is set, then skipImageScanFlag must also be set.
@@ -366,24 +389,20 @@ func validateHashreleasePublishFlags(c *cli.Context) error {
 }
 
 // ciJobURL returns the URL to the CI job if the command is running on CI.
-func ciJobURL(c *cli.Context) string {
+func ciJobURL(c *cli.Command) string {
 	if !c.Bool(ciFlag.Name) {
 		return ""
 	}
 	return fmt.Sprintf("%s/jobs/%s", c.String(ciBaseURLFlag.Name), c.String(ciJobIDFlag.Name))
 }
 
-func hashreleaseServerConfig(c *cli.Context) *hashreleaseserver.Config {
+func hashreleaseServerConfig(c *cli.Command) *hashreleaseserver.Config {
 	return &hashreleaseserver.Config{
-		Host:       c.String(sshHostFlag.Name),
-		User:       c.String(sshUserFlag.Name),
-		Key:        c.String(sshKeyFlag.Name),
-		Port:       c.String(sshPortFlag.Name),
-		KnownHosts: c.String(sshKnownHostsFlag.Name),
+		BucketName: c.String(hashreleaseServerBucketFlag.Name),
 	}
 }
 
-func imageScanningAPIConfig(c *cli.Context) *imagescanner.Config {
+func imageScanningAPIConfig(c *cli.Command) *imagescanner.Config {
 	return &imagescanner.Config{
 		APIURL:  c.String(imageScannerAPIFlag.Name),
 		Token:   c.String(imageScannerTokenFlag.Name),
@@ -391,11 +410,11 @@ func imageScanningAPIConfig(c *cli.Context) *imagescanner.Config {
 	}
 }
 
-func validateCIBuildRequirements(c *cli.Context, repoRootDir string) error {
+func validateCIBuildRequirements(c *cli.Command, repoRootDir string) error {
 	if !c.Bool(ciFlag.Name) {
 		return nil
 	}
-	if c.Bool(buildImagesFlag.Name) {
+	if c.Bool(buildHashreleaseImagesFlag.Name) {
 		logrus.Info("Building images in hashrelease, skipping images promotions check...")
 		return nil
 	}

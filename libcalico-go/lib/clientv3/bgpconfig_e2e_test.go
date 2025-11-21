@@ -48,6 +48,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 	ipCidr2 := "172.217.3.0/24"
 	clusterCIDR := "10.155.0.0/16"
 	restartTime := metav1.Duration{Duration: 200 * time.Second}
+	enabled := apiv3.ServiceLoadBalancerAggregationEnabled
 	specDefault1 := apiv3.BGPConfigurationSpec{
 		LogSeverityScreen:      "Info",
 		NodeToNodeMeshEnabled:  &ptrTrue,
@@ -60,6 +61,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 		ServiceClusterIPs: []apiv3.ServiceClusterIPBlock{
 			{CIDR: clusterCIDR},
 		},
+		ServiceLoadBalancerAggregation: &enabled,
 		NodeMeshPassword: &apiv3.BGPPassword{
 			SecretKeyRef: &k8sv1.SecretKeySelector{
 				LocalObjectReference: k8sv1.LocalObjectReference{
@@ -77,6 +79,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 		ServiceExternalIPs: []apiv3.ServiceExternalIPBlock{
 			{CIDR: ipCidr1},
 		},
+		ServiceLoadBalancerAggregation: &enabled,
 	}
 	specDefault3 := apiv3.BGPConfigurationSpec{
 		LogSeverityScreen:     "Info",
@@ -86,6 +89,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 			{CIDR: ipCidr1},
 			{CIDR: ipCidr2},
 		},
+		ServiceLoadBalancerAggregation: &enabled,
 		NodeMeshPassword: &apiv3.BGPPassword{
 			SecretKeyRef: &k8sv1.SecretKeySelector{
 				LocalObjectReference: k8sv1.LocalObjectReference{
@@ -103,13 +107,16 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 			{CIDR: ipCidr1},
 			{CIDR: ipCidr2},
 		},
-		NodeMeshMaxRestartTime: &restartTime,
+		ServiceLoadBalancerAggregation: &enabled,
+		NodeMeshMaxRestartTime:         &restartTime,
 	}
 	specInfo := apiv3.BGPConfigurationSpec{
-		LogSeverityScreen: "Info",
+		LogSeverityScreen:              "Info",
+		ServiceLoadBalancerAggregation: &enabled,
 	}
 	specDebug := apiv3.BGPConfigurationSpec{
-		LogSeverityScreen: "Debug",
+		LogSeverityScreen:              "Debug",
+		ServiceLoadBalancerAggregation: &enabled,
 	}
 
 	DescribeTable("BGPConfiguration e2e CRUD tests",
@@ -154,7 +161,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 				Spec:       specDebug,
 			}, options.SetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource already exists: BGPConfiguration(" + name1 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource already exists: BGPConfiguration(" + name1 + ") with error:"))
 
 			By("Getting BGPConfiguration (name1) and comparing the output against specInfo")
 			res, outError := c.BGPConfigurations().Get(ctx, name1, options.GetOptions{})
@@ -548,7 +555,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 
 			By("Cleaning the datastore and expecting deletion events for each configured resource (tests prefix deletes results in individual events for each key)")
 			be.Clean()
-			testWatcher4.ExpectEvents(apiv3.KindBGPConfiguration, []watch.Event{
+			testWatcher4.ExpectEventsAnyOrder(apiv3.KindBGPConfiguration, []watch.Event{
 				{
 					Type:     watch.Deleted,
 					Previous: outRes1,

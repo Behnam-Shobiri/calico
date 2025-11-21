@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	MaxCounterNumber    int = 22
+	MaxCounterNumber    int = 26
 	counterMapKeySize   int = 8
 	counterMapValueSize int = 8
 )
@@ -81,6 +81,10 @@ const (
 	RedirectPeer
 	DroppedFragWait
 	DroppedFragReorder
+	DroppedFragUnsupported
+	DroppedQoS
+	Reserved1
+	DroppedMaglevNoBackend
 )
 
 type Description struct {
@@ -194,6 +198,18 @@ var descriptions DescList = DescList{
 	{
 		Counter:  DroppedFragReorder,
 		Category: "Dropped", Caption: "fragment out of order within host",
+	},
+	{
+		Counter:  DroppedFragUnsupported,
+		Category: "Dropped", Caption: "fragments not supported",
+	},
+	{
+		Counter:  DroppedQoS,
+		Category: "Dropped", Caption: "QoS control limit",
+	},
+	{
+		Counter:  DroppedMaglevNoBackend,
+		Category: "Dropped", Caption: "Maglev lookup found no backends for service IP",
 	},
 }
 

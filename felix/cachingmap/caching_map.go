@@ -31,6 +31,11 @@ type DataplaneMap[K comparable, V comparable] interface {
 	ErrIsNotExists(error) bool
 }
 
+type DataplaneBatchedMap[K comparable, V comparable] interface {
+	BatchUpdate(ks []K, vs []V) (int, error)
+	BatchDelete(ks []K) (int, error)
+}
+
 // CachingMap provides a caching layer around a DataplaneMap, when one of the Apply methods is called, it applies
 // a minimal set of changes to the dataplane map to bring it into sync with the desired state.  Updating the
 // desired state in and of itself has no effect on the dataplane.
@@ -94,7 +99,10 @@ func (c *CachingMap[K, V]) Desired() ReadWriteMap[K, V] {
 	return c.deltaTracker.Desired()
 }
 
-func (c *CachingMap[K, V]) Dataplane() ReadOnlyMap[K, V] {
+// Updating the dataplane means it is updated out-of-band
+// and its the caller's responsibility to keep Desired and
+// Dataplane in sync.
+func (c *CachingMap[K, V]) Dataplane() ReadWriteMap[K, V] {
 	// Pass through to the delta tracker.
 	return c.deltaTracker.Dataplane()
 }
@@ -131,16 +139,30 @@ func (c *CachingMap[K, V]) ApplyUpdatesOnly() error {
 	if err != nil {
 		return err
 	}
+
 	var errs ErrSlice
-	c.deltaTracker.PendingUpdates().Iter(func(k K, v V) deltatracker.IterAction {
-		err := c.dpMap.Update(k, v)
-		if err != nil {
-			logrus.WithError(err).Warn("Error while updating DP map")
-			errs = append(errs, err)
-			return deltatracker.IterActionNoOp
-		}
-		return deltatracker.IterActionUpdateDataplane
-	})
+
+	if bmap, ok := c.dpMap.(DataplaneBatchedMap[K, V]); ok {
+		c.deltaTracker.PendingUpdates().IterBatched(func(ks []K, vs []V) (int, error) {
+			n, err := bmap.BatchUpdate(ks, vs)
+			if err != nil {
+				logrus.WithError(err).Warn("Error while updating DP map")
+				errs = append(errs, err)
+			}
+			return n, err
+		})
+	} else {
+		c.deltaTracker.PendingUpdates().Iter(func(k K, v V) deltatracker.IterAction {
+			err := c.dpMap.Update(k, v)
+			if err != nil {
+				logrus.WithError(err).Warn("Error while updating DP map")
+				errs = append(errs, err)
+				return deltatracker.IterActionNoOp
+			}
+			return deltatracker.IterActionUpdateDataplane
+		})
+	}
+
 	if len(errs) > 0 {
 		return errs
 	}
@@ -156,15 +178,33 @@ func (c *CachingMap[K, V]) ApplyDeletionsOnly() error {
 		return err
 	}
 	var errs ErrSlice
-	c.deltaTracker.PendingDeletions().Iter(func(k K) deltatracker.IterAction {
-		err := c.dpMap.Delete(k)
-		if err != nil && !c.dpMap.ErrIsNotExists(err) {
-			logrus.WithError(err).Warn("Error while deleting from DP map")
-			errs = append(errs, err)
-			return deltatracker.IterActionNoOp
-		}
-		return deltatracker.IterActionUpdateDataplane
-	})
+
+	if bmap, ok := c.dpMap.(DataplaneBatchedMap[K, V]); ok {
+		c.deltaTracker.PendingDeletions().IterBatched(func(ks []K) (int, error) {
+			n, err := bmap.BatchDelete(ks)
+			if err != nil {
+				if c.dpMap.ErrIsNotExists(err) {
+					n++ // it actually was a success
+					err = nil
+				} else {
+					logrus.WithError(err).Warn("Error while deleting from DP map")
+					errs = append(errs, err)
+				}
+			}
+			return n, err
+		})
+	} else {
+		c.deltaTracker.PendingDeletions().Iter(func(k K) deltatracker.IterAction {
+			err := c.dpMap.Delete(k)
+			if err != nil && !c.dpMap.ErrIsNotExists(err) {
+				logrus.WithError(err).Warn("Error while deleting from DP map")
+				errs = append(errs, err)
+				return deltatracker.IterActionNoOp
+			}
+			return deltatracker.IterActionUpdateDataplane
+		})
+	}
+
 	if len(errs) > 0 {
 		return errs
 	}

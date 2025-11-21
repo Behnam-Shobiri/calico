@@ -29,7 +29,7 @@ import (
 
 	"github.com/projectcalico/calico/felix/deltatracker"
 	"github.com/projectcalico/calico/felix/ip"
-	"github.com/projectcalico/calico/felix/labelindex"
+	"github.com/projectcalico/calico/felix/labelindex/ipsetmember"
 	"github.com/projectcalico/calico/felix/logutils"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
 )
@@ -588,7 +588,7 @@ func (s *IPSets) resyncIPSet(ipSetName string) error {
 						maxElem, err := strconv.Atoi(parts[idx+1])
 						if err != nil {
 							return fmt.Errorf(
-								"Failed to parse ipset list Header line. line: '%v', err: %w", line, err)
+								"failed to parse ipset list Header line. line: '%v', err: %w", line, err)
 						}
 						meta.MaxSize = maxElem
 						break
@@ -596,13 +596,13 @@ func (s *IPSets) resyncIPSet(ipSetName string) error {
 					if p == "range" {
 						if idx+1 >= len(parts) {
 							return fmt.Errorf(
-								"Failed to parse ipset list Header line, nothing after 'range'. line: '%v'", line)
+								"failed to parse ipset list Header line, nothing after 'range'. line: '%v'", line)
 						}
 						// For bitmaps, we see "range 123-456"
 						rMin, rMAx, err := ParseRange(parts[idx+1])
 						if err != nil {
 							return fmt.Errorf(
-								"Failed to parse ipset list Header line. line: '%v', err: %w", line, err)
+								"failed to parse ipset list Header line. line: '%v', err: %w", line, err)
 						}
 						meta.RangeMin = rMin
 						meta.RangeMax = rMAx
@@ -663,7 +663,7 @@ func (s *IPSets) resyncIPSet(ipSetName string) error {
 					return scanner.Err()
 				})
 				if err != nil {
-					return fmt.Errorf("Failed to read members from 'ipset list'. err: %w", err)
+					return fmt.Errorf("failed to read members from 'ipset list'. err: %w", err)
 				}
 
 				if numMissing := memberTracker.PendingUpdates().Len(); numMissing > 0 {
@@ -1220,14 +1220,14 @@ func CanonicaliseMember(t IPSetType, member string) IPSetMember {
 		}
 		// parts[1] should contain "(tcp|udp|sctp):<port number>"
 		parts = strings.Split(parts[1], ":")
-		var proto labelindex.IPSetPortProtocol
+		var proto ipsetmember.Protocol
 		switch strings.ToLower(parts[0]) {
 		case "udp":
-			proto = labelindex.ProtocolUDP
+			proto = ipsetmember.ProtocolUDP
 		case "tcp":
-			proto = labelindex.ProtocolTCP
+			proto = ipsetmember.ProtocolTCP
 		case "sctp":
-			proto = labelindex.ProtocolSCTP
+			proto = ipsetmember.ProtocolSCTP
 		default:
 			log.WithField("member", member).Panic("Unknown protocol")
 		}

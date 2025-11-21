@@ -18,10 +18,12 @@ struct ifstate_val {
 	__s32 tc_filter_egress;
 };
 
+#define IFACE_STATE_MAP_SIZE 1000
+
 CALI_MAP(cali_iface, 4,
 		BPF_MAP_TYPE_HASH,
 		__u32, struct ifstate_val,
-		1000, BPF_F_NO_PREALLOC)
+		IFACE_STATE_MAP_SIZE, BPF_F_NO_PREALLOC)
 
 #define IFACE_STATE_WEP         0x1
 #define IFACE_STATE_V4_READY    0x2

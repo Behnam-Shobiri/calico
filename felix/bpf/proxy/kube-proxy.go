@@ -41,14 +41,16 @@ type KubeProxy struct {
 	exiting       chan struct{}
 	wg            sync.WaitGroup
 
-	k8s         kubernetes.Interface
-	hostname    string
-	frontendMap maps.MapWithExistsCheck
-	backendMap  maps.MapWithExistsCheck
-	affinityMap maps.Map
-	ctMap       maps.Map
-	rt          *RTCache
-	opts        []Option
+	k8s           kubernetes.Interface
+	hostname      string
+	frontendMap   maps.MapWithExistsCheck
+	backendMap    maps.MapWithExistsCheck
+	MaglevMap     maps.MapWithExistsCheck
+	maglevLUTSize int
+	affinityMap   maps.Map
+	ctMap         maps.Map
+	rt            *RTCache
+	opts          []Option
 
 	excludedCIDRs *ip.CIDRTrie
 
@@ -65,6 +67,7 @@ func StartKubeProxy(k8s kubernetes.Interface, hostname string,
 		hostname:    hostname,
 		frontendMap: bpfMaps.FrontendMap.(maps.MapWithExistsCheck),
 		backendMap:  bpfMaps.BackendMap.(maps.MapWithExistsCheck),
+		MaglevMap:   bpfMaps.MaglevMap.(maps.MapWithExistsCheck),
 		affinityMap: bpfMaps.AffinityMap,
 		ctMap:       bpfMaps.CtMap,
 		opts:        opts,
@@ -131,12 +134,13 @@ func (kp *KubeProxy) run(hostIPs []net.IP) error {
 		withLocalNP = append(withLocalNP, podNPIPV6)
 	}
 
-	syncer, err := NewSyncer(kp.ipFamily, withLocalNP, kp.frontendMap, kp.backendMap, kp.affinityMap,
-		kp.rt, kp.excludedCIDRs)
+	syncer, err := NewSyncer(kp.ipFamily, withLocalNP, kp.frontendMap, kp.backendMap, kp.MaglevMap, kp.affinityMap,
+		kp.rt, kp.excludedCIDRs, kp.maglevLUTSize)
 	if err != nil {
 		return errors.WithMessage(err, "new bpf syncer")
 	}
 
+	kp.proxy.SetHostIPs(hostIPs)
 	kp.proxy.SetSyncer(syncer)
 
 	log.Infof("kube-proxy v%d node info updated, hostname=%q hostIPs=%+v", kp.ipFamily, kp.hostname, hostIPs)
@@ -154,7 +158,7 @@ func (kp *KubeProxy) start() error {
 		withLocalNP = append(withLocalNP, podNPIPV6)
 	}
 
-	syncer, err := NewSyncer(kp.ipFamily, withLocalNP, kp.frontendMap, kp.backendMap, kp.affinityMap, kp.rt, kp.excludedCIDRs)
+	syncer, err := NewSyncer(kp.ipFamily, withLocalNP, kp.frontendMap, kp.backendMap, kp.MaglevMap, kp.affinityMap, kp.rt, kp.excludedCIDRs, kp.maglevLUTSize)
 	if err != nil {
 		return errors.WithMessage(err, "new bpf syncer")
 	}
@@ -254,7 +258,7 @@ func (kp *KubeProxy) ConntrackFrontendHasBackend(ip net.IP, port uint16, backend
 	// Thanks to holding the lock since ConntrackScanStart, this condition holds for the
 	// whole iteration. So if we started without syncer, we will also finish without it.
 	// And if we had a syncer, we will have the same until the end.
-	if kp.syncer != nil {
+	if kp.syncer != nil && kp.syncer.HasSynced() {
 		return kp.syncer.ConntrackFrontendHasBackend(ip, port, backendIP, backendPort, proto)
 	}
 
@@ -264,7 +268,7 @@ func (kp *KubeProxy) ConntrackFrontendHasBackend(ip net.IP, port uint16, backend
 
 // ConntrackDestIsService to satisfy conntrack.NATChecker - forwards to syncer.
 func (kp *KubeProxy) ConntrackDestIsService(ip net.IP, port uint16, proto uint8) bool {
-	if kp.syncer != nil {
+	if kp.syncer != nil && kp.syncer.HasSynced() {
 		return kp.syncer.ConntrackDestIsService(ip, port, proto)
 	}
 

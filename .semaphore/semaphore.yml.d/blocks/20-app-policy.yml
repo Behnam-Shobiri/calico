@@ -1,6 +1,6 @@
-- name: app-policy
+- name: Application Layer Policy
   run:
-    when: "${FORCE_RUN} or change_in(['/*', '/app-policy/', '/felix/'], {exclude: ['/**/.gitignore', '/**/README.md', '/**/LICENSE']})"
+    when: "${CHANGE_IN(app-policy)}"
   dependencies:
     - Prerequisites
   task:
@@ -8,6 +8,6 @@
       commands:
         - cd app-policy
     jobs:
-      - name: app-policy tests
+      - name: "Application Layer Policy: CI"
         commands:
           - ../.semaphore/run-and-monitor ci.log make ci

@@ -1,5 +1,5 @@
 // Project Calico BPF dataplane programs.
-// Copyright (c) 2020-2022 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
 
 #ifndef __CALI_BPF_H__
@@ -12,6 +12,7 @@
 #include <bpf_core_read.h>
 #include <stddef.h>
 #include <linux/ip.h>
+#include <stdbool.h>
 
 /* CALI_BPF_INLINE must be defined before we include any of our headers. They
  * assume it exists!
@@ -106,11 +107,9 @@
 #error CALI_RES_ values need to be increased above TC_ACT_VALUE_MAX
 #endif
 
-#ifndef CALI_FIB_LOOKUP_ENABLED
-#define CALI_FIB_LOOKUP_ENABLED true
-#endif
+#define HAS_MAGLEV        (CALI_F_FROM_HEP && CALI_F_MAIN)
 
-#define CALI_FIB_ENABLED (!CALI_F_L3 && CALI_FIB_LOOKUP_ENABLED && (CALI_F_TO_HOST || CALI_F_TO_HEP))
+#define CALI_FIB_ENABLED (CALI_F_TO_HOST || CALI_F_TO_HEP)
 
 #define COMPILE_TIME_ASSERT(expr) {typedef char array[(expr) ? 1 : -1];}
 static CALI_BPF_INLINE void __compile_asserts(void) {
@@ -222,14 +221,14 @@ enum calico_skb_mark {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winvalid-noreturn"
 static CALI_BPF_INLINE __attribute__((noreturn)) void bpf_exit(int rc) {
-	// Need volatile here because we don't use rc after this assembler fragment.
-	// The BPF assembler rejects an input-only operand so we make r0 an in/out operand.
-	asm volatile ( \
-		"exit" \
-		: "=r0" (rc) /*out*/ \
-		: "0" (rc) /*in*/ \
-		: /*clobber*/ \
+	asm volatile (
+		"r0 = %[rc_arg]\n" //Explicitly move the value of 'rc' into register R0 to prohibit excessive compiler optimization and make the verifier happy
+		"exit"
+		: // No output operands
+		: [rc_arg] "r" (rc) // Input: rc to a general purpose register
+		: "r0" // Clobber list: R0 is modified by the assembly code
 	);
+	__builtin_unreachable(); // Tell the compiler that this function never returns
 }
 #pragma clang diagnostic pop
 
@@ -320,22 +319,11 @@ extern const volatile struct cali_tc_preamble_globals __globals;
 #define NATIN_IFACE	CALI_CONFIGURABLE(natin_idx)
 #define PROFILING	CALI_CONFIGURABLE(profiling)
 #define OVERLAY_TUNNEL_ID CALI_CONFIGURABLE(overlay_tunnel_id)
+#define EGRESS_DSCP CALI_CONFIGURABLE(dscp)
 
 #define FLOWLOGS_ENABLED (GLOBAL_FLAGS & CALI_GLOBALS_FLOWLOGS_ENABLED)
-
-#ifdef UNITTEST
-#define CALI_PATCH_DEFINE(name, pattern)							\
-static CALI_BPF_INLINE __be32 cali_patch_##name()					\
-{												\
-	__u32 ret;										\
-	asm("%0 = " #pattern ";" : "=r"(ret) /* output */ : /* no inputs */ : /* no clobber */);\
-	return ret;										\
-}
-#define CALI_PATCH(name)	cali_patch_##name()
-
-CALI_PATCH_DEFINE(__skb_mark, 0x4d424b53) /* be 0x4d424b53 = ASCII(SKBM) */
-#define SKB_MARK	CALI_PATCH(__skb_mark)
-#endif
+#define INGRESS_PACKET_RATE_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_INGRESS_PACKET_RATE_CONFIGURED)
+#define EGRESS_PACKET_RATE_CONFIGURED (GLOBAL_FLAGS & CALI_GLOBALS_EGRESS_PACKET_RATE_CONFIGURED)
 
 #define map_symbol(name, ver) name##ver
 

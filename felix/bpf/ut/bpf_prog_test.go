@@ -29,8 +29,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
 	"github.com/onsi/gomega/types"
@@ -54,6 +54,7 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/perf"
 	"github.com/projectcalico/calico/felix/bpf/polprog"
 	"github.com/projectcalico/calico/felix/bpf/profiling"
+	"github.com/projectcalico/calico/felix/bpf/qos"
 	"github.com/projectcalico/calico/felix/bpf/routes"
 	"github.com/projectcalico/calico/felix/bpf/state"
 	tcdefs "github.com/projectcalico/calico/felix/bpf/tc/defs"
@@ -78,8 +79,9 @@ func init() {
 
 // Constants that are shared with the UT binaries that we build.
 const (
-	natTunnelMTU  = uint16(700)
-	testVxlanPort = uint16(5665)
+	natTunnelMTU      = uint16(700)
+	testVxlanPort     = uint16(5665)
+	testMaglevLUTSize = uint32(31)
 )
 
 var (
@@ -96,6 +98,8 @@ var (
 	node1ip2   = net.IPv4(10, 10, 2, 1).To4()
 	node1tunIP = net.IPv4(11, 11, 0, 1).To4()
 	node2ip    = net.IPv4(10, 10, 0, 2).To4()
+	node3ip    = net.IPv4(10, 10, 0, 3).To4()
+	node3tunIP = net.IPv4(11, 11, 0, 3).To4()
 	intfIP     = net.IPv4(10, 10, 0, 3).To4()
 	node1CIDR  = net.IPNet{
 		IP:   node1ip,
@@ -105,11 +109,17 @@ var (
 		IP:   node2ip,
 		Mask: net.IPv4Mask(255, 255, 255, 255),
 	}
+	node3CIDR = net.IPNet{
+		IP:   node3ip,
+		Mask: net.IPv4Mask(255, 255, 255, 255),
+	}
 
 	node1ipV6    = net.ParseIP("abcd::ffff:0a0a:0001").To16()
 	node1ip2V6   = net.ParseIP("abcd::ffff:0a0a:0201").To16()
 	node1tunIPV6 = net.ParseIP("abcd::ffff:0b0b:0001").To16()
 	node2ipV6    = net.ParseIP("abcd::ffff:0a0a:0002").To16()
+	node3ipV6    = net.ParseIP("abcd::ffff:0a0a:0004").To16()
+	node3tunIPV6 = net.ParseIP("abcd::ffff:0b0b:0004").To16()
 	intfIPV6     = net.ParseIP("abcd::ffff:0a0a:0003").To16()
 	node1CIDRV6  = net.IPNet{
 		IP:   node1ipV6,
@@ -117,6 +127,10 @@ var (
 	}
 	node2CIDRV6 = net.IPNet{
 		IP:   node2ipV6,
+		Mask: net.CIDRMask(128, 128),
+	}
+	node3CIDRV6 = net.IPNet{
+		IP:   node3ipV6,
 		Mask: net.CIDRMask(128, 128),
 	}
 )
@@ -213,6 +227,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexIcmpInnerNat,
 		tcdefs.ProgIndexNewFlow,
 		tcdefs.ProgIndexIPFrag,
+		tcdefs.ProgIndexMaglev,
 	},
 	"IPv4 debug": []int{
 		tcdefs.ProgIndexMainDebug,
@@ -224,6 +239,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexIcmpInnerNatDebug,
 		tcdefs.ProgIndexNewFlowDebug,
 		tcdefs.ProgIndexIPFragDebug,
+		tcdefs.ProgIndexMaglevDebug,
 	},
 	"IPv6": []int{
 		tcdefs.ProgIndexMain,
@@ -234,6 +250,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexHostCtConflict,
 		tcdefs.ProgIndexIcmpInnerNat,
 		tcdefs.ProgIndexNewFlow,
+		tcdefs.ProgIndexMaglev,
 	},
 	"IPv6 debug": []int{
 		tcdefs.ProgIndexMainDebug,
@@ -244,6 +261,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexHostCtConflictDebug,
 		tcdefs.ProgIndexIcmpInnerNatDebug,
 		tcdefs.ProgIndexNewFlowDebug,
+		tcdefs.ProgIndexMaglevDebug,
 	},
 }
 
@@ -309,6 +327,7 @@ func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rul
 		logLevel:  log.DebugLevel,
 		psnaStart: 20000,
 		psnatEnd:  30000,
+		dscp:      -1,
 	}
 
 	for _, o := range opts {
@@ -360,7 +379,7 @@ func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rul
 			log.WithField("hostIP", hostIP).Info("Host IP")
 			log.WithField("intfIP", intfIP).Info("Intf IP")
 		}
-		obj += fmt.Sprintf("fib_%s", loglevel)
+		obj += loglevel
 
 		if strings.Contains(section, "_dsr") {
 			obj += "_dsr"
@@ -383,34 +402,22 @@ func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rul
 	}
 
 	if topts.xdp {
-		o, err := objLoad("../../bpf-gpl/bin/xdp_preamble.o", bpfFsDir, "preamble", topts, false, false)
+		o, err := objLoad("../../bpf-gpl/bin/xdp_preamble.o", bpfFsDir, "preamble", topts, false, false, false)
 		Expect(err).NotTo(HaveOccurred())
 		defer o.Close()
 	} else {
-		o, err := objLoad("../../bpf-gpl/bin/tc_preamble.o", bpfFsDir, "preamble", topts, false, false)
+		o, err := objLoad("../../bpf-gpl/bin/tc_preamble.o", bpfFsDir, "preamble", topts, false, false, false)
 		Expect(err).NotTo(HaveOccurred())
 		defer o.Close()
 	}
-
-	log.Infof("Patching binary %s", obj+".o")
-
-	bin, err := bpf.BinaryFromFile(obj + ".o")
-	Expect(err).NotTo(HaveOccurred())
-	// XXX for now we both path the mark here and include it in the context as
-	// well. This needs to be done for as long as we want to run the tests on
-	// older kernels.
-	bin.PatchSkbMark(skbMark)
-	tempObj := tempDir + "bpf.o"
-	err = bin.WriteToFile(tempObj)
-	Expect(err).NotTo(HaveOccurred())
 
 	if loglevel == "debug" {
 		ipFamily += " debug"
 	}
 
-	var o *libbpf.Obj
-
-	o, err = objLoad(tempObj, bpfFsDir, ipFamily, topts, rules != nil, true)
+	hasMaglev := strings.Contains(obj, "from_hep")
+	obj += ".o"
+	o, err := objLoad(obj, bpfFsDir, ipFamily, topts, rules != nil, true, hasMaglev)
 	Expect(err).NotTo(HaveOccurred())
 	defer o.Close()
 
@@ -500,10 +507,7 @@ func caller(skip int) string {
 // runBpfTest runs a specific section of the entire bpf program in isolation
 func runBpfTest(t *testing.T, section string, rules *polprog.Rules, testFn func(bpfProgRunFn), opts ...testOption) {
 	RegisterTestingT(t)
-	xdp := false
-	if strings.Contains(section, "xdp") {
-		xdp = true
-	}
+	xdp := strings.Contains(section, "xdp")
 
 	ctxIn := make([]byte, 18*4)
 	binary.LittleEndian.PutUint32(ctxIn[2*4:3*4], skbMark)
@@ -582,12 +586,14 @@ func bpftool(args ...string) ([]byte, error) {
 var (
 	mapInitOnce sync.Once
 
-	natMap, natBEMap, ctMap, rtMap, ipsMap, testStateMap, affinityMap, arpMap, fsafeMap, ipfragsMap maps.Map
-	natMapV6, natBEMapV6, ctMapV6, rtMapV6, ipsMapV6, affinityMapV6, arpMapV6, fsafeMapV6           maps.Map
-	stateMap, countersMap, ifstateMap, progMap, progMapXDP, policyJumpMap, policyJumpMapXDP         maps.Map
-	perfMap                                                                                         maps.Map
-	profilingMap, ipfragsMapTmp                                                                     maps.Map
-	allMaps                                                                                         []maps.Map
+	natMap, natBEMap, ctMap, ctCleanupMap, rtMap, ipsMap, testStateMap, affinityMap, arpMap, fsafeMap, ipfragsMap, maglevMap maps.Map
+	natMapV6, natBEMapV6, ctMapV6, ctCleanupMapV6, rtMapV6, ipsMapV6, affinityMapV6, arpMapV6, fsafeMapV6, maglevMapV6       maps.Map
+	stateMap, countersMap, ifstateMap, progMap, progMapXDP, policyJumpMap, policyJumpMapXDP                                  maps.Map
+	perfMap                                                                                                                  maps.Map
+	profilingMap, ipfragsMapTmp                                                                                              maps.Map
+	qosMap                                                                                                                   maps.Map
+	ctlbProgsMap                                                                                                             []maps.Map
+	allMaps                                                                                                                  []maps.Map
 )
 
 func initMapsOnce() {
@@ -598,6 +604,8 @@ func initMapsOnce() {
 		natBEMapV6 = nat.BackendMapV6()
 		ctMap = conntrack.Map()
 		ctMapV6 = conntrack.MapV6()
+		ctCleanupMap = conntrack.CleanupMap()
+		ctCleanupMapV6 = conntrack.CleanupMapV6()
 		rtMap = routes.Map()
 		rtMapV6 = routes.MapV6()
 		ipsMap = ipsets.Map()
@@ -617,13 +625,17 @@ func initMapsOnce() {
 		policyJumpMap = jump.Map()
 		policyJumpMapXDP = jump.XDPMap()
 		profilingMap = profiling.Map()
+		ctlbProgsMap = nat.ProgramsMap()
+		qosMap = qos.Map()
+		maglevMap = nat.MaglevMap()
+		maglevMapV6 = nat.MaglevMapV6()
 
 		perfMap = perf.Map("perf_evnt", 512)
 
-		allMaps = []maps.Map{natMap, natBEMap, natMapV6, natBEMapV6, ctMap, ctMapV6, rtMap, rtMapV6, ipsMap, ipsMapV6,
+		allMaps = []maps.Map{natMap, natBEMap, natMapV6, natBEMapV6, ctMap, ctMapV6, ctCleanupMap, ctCleanupMapV6, rtMap, rtMapV6, ipsMap, ipsMapV6,
 			stateMap, testStateMap, affinityMap, affinityMapV6, arpMap, arpMapV6, fsafeMap, fsafeMapV6,
 			countersMap, ipfragsMap, ipfragsMapTmp, ifstateMap, profilingMap,
-			policyJumpMap, policyJumpMapXDP}
+			policyJumpMap, policyJumpMapXDP, ctlbProgsMap[0], ctlbProgsMap[1], ctlbProgsMap[2], qosMap, maglevMap, maglevMapV6}
 		for _, m := range allMaps {
 			err := m.EnsureExists()
 			if err != nil {
@@ -697,7 +709,7 @@ func ipToU32(ip net.IP) uint32 {
 	return binary.LittleEndian.Uint32([]byte(ip[:]))
 }
 
-func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflictProg bool) error {
+func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflictProg, hasMaglev bool) error {
 	for _, idx := range progs {
 		switch idx {
 		case
@@ -713,6 +725,12 @@ func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflic
 			if !hasHostConflictProg {
 				continue
 			}
+		case
+			tcdefs.ProgIndexMaglev,
+			tcdefs.ProgIndexMaglevDebug:
+			if !hasMaglev {
+				continue
+			}
 		}
 		log.WithField("prog", tcdefs.ProgramNames[idx]).WithField("idx", idx).Debug("UpdateJumpMap")
 		err := obj.UpdateJumpMap(progMap.GetName(), tcdefs.ProgramNames[idx], idx)
@@ -724,7 +742,7 @@ func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflic
 	return nil
 }
 
-func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostConflictProg bool) (*libbpf.Obj, error) {
+func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostConflictProg, hasMaglev bool) (*libbpf.Obj, error) {
 	log.WithField("program", fname).Debug("Loading BPF program")
 
 	forXDP := topts.xdp
@@ -756,7 +774,10 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 
 	for m, err := obj.FirstMap(); m != nil && err == nil; m, err = m.NextMap() {
 		if m.IsMapInternal() {
-			if strings.HasPrefix(m.Name(), ".rodata") {
+			if ipFamily != "preamble" {
+				continue
+			}
+			if !strings.HasSuffix(m.Name(), ".rodata") {
 				continue
 			}
 			if forXDP {
@@ -777,17 +798,35 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 			} else {
 				ifaceLog := topts.progLog + "-" + bpfIfaceName
 				globals := libbpf.TcGlobalData{
-					Tmtu:         natTunnelMTU,
-					VxlanPort:    testVxlanPort,
-					PSNatStart:   uint16(topts.psnaStart),
-					PSNatLen:     uint16(topts.psnatEnd-topts.psnaStart) + 1,
-					Flags:        libbpf.GlobalsNoDSRCidrs,
-					LogFilterJmp: 0xffffffff,
-					IfaceName:    setLogPrefix(ifaceLog),
+					Tmtu:          natTunnelMTU,
+					VxlanPort:     testVxlanPort,
+					PSNatStart:    uint16(topts.psnaStart),
+					PSNatLen:      uint16(topts.psnatEnd-topts.psnaStart) + 1,
+					Flags:         libbpf.GlobalsNoDSRCidrs,
+					LogFilterJmp:  0xffffffff,
+					IfaceName:     setLogPrefix(ifaceLog),
+					MaglevLUTSize: testMaglevLUTSize,
 				}
 				if topts.flowLogsEnabled {
 					globals.Flags |= libbpf.GlobalsFlowLogsEnabled
 				}
+				if topts.natOutExcludeHosts {
+					globals.Flags |= libbpf.GlobalsNATOutgoingExcludeHosts
+				}
+
+				if topts.ingressQoSPacketRate {
+					globals.Flags |= libbpf.GlobalsIngressPacketRateConfigured
+				}
+
+				if topts.egressQoSPacketRate {
+					globals.Flags |= libbpf.GlobalsEgressPacketRateConfigured
+				}
+
+				globals.DSCP = -1
+				if topts.dscp >= 0 {
+					globals.DSCP = topts.dscp
+				}
+
 				if topts.ipv6 {
 					copy(globals.HostTunnelIPv6[:], node1tunIPV6.To16())
 					copy(globals.HostIPv6[:], hostIP.To16())
@@ -821,12 +860,18 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 			"key size":   m.KeySize(),
 			"value size": m.ValueSize(),
 		}).Debug("Pinning map")
-		cmd := exec.Command("bpftool", "map", "show", "pinned", pin)
-		log.WithField("cmd", cmd.String()).Debugf("executing")
-		out, _ := cmd.Output()
-		log.WithField("output", string(out)).Debug("map")
-		log.WithField("size", m.MaxEntries()).Debug("libbpf map")
-		log.WithField("entry size", m.ValueSize()).Debug("libbpf map")
+		fd, err := maps.GetMapFDByPin(pin)
+		if err != nil {
+			log.WithError(err).Debug("error getting map FD by pin")
+		} else {
+			mapInfo, err := maps.GetMapInfo(fd)
+			if err != nil {
+				log.WithError(err).Debug("error getting mapInfo by FD")
+			} else {
+				log.WithFields(log.Fields{"Type": mapInfo.Type, "MaxEntries": mapInfo.MaxEntries, "ValueSize": mapInfo.ValueSize, "KeySize": mapInfo.KeySize}).Debug("existing map")
+			}
+		}
+		log.WithFields(log.Fields{"Type": m.Type(), "MaxEntries": m.MaxEntries(), "ValueSize": m.ValueSize(), "KeySize": m.KeySize()}).Debug("new map")
 		if err := m.SetPinPath(pin); err != nil {
 			obj.Close()
 			return nil, fmt.Errorf("error pinning map %s: %w", m.Name(), err)
@@ -869,11 +914,11 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 
 	if !forXDP {
 		log.WithField("ipFamily", ipFamily).Debug("Updating jump map")
-		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, hasHostConflictProg)
+		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, hasHostConflictProg, hasMaglev)
 		if err != nil && !strings.Contains(err.Error(), "error updating calico_tc_host_ct_conflict program") {
 			goto out
 		}
-		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, false)
+		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, false, hasMaglev)
 	} else {
 		if err = xdpUpdateJumpMap(obj, xdpJumpMapIndexes[ipFamily]); err != nil {
 			goto out
@@ -901,13 +946,17 @@ func objUTLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHos
 
 	for m, err := obj.FirstMap(); m != nil && err == nil; m, err = m.NextMap() {
 		if m.IsMapInternal() {
+			if !strings.HasSuffix(m.Name(), ".rodata") {
+				continue
+			}
 			globals := libbpf.TcGlobalData{
-				Tmtu:       natTunnelMTU,
-				VxlanPort:  testVxlanPort,
-				PSNatStart: uint16(topts.psnaStart),
-				PSNatLen:   uint16(topts.psnatEnd-topts.psnaStart) + 1,
-				Flags:      libbpf.GlobalsNoDSRCidrs,
-				IfaceName:  setLogPrefix(topts.progLog + "-" + bpfIfaceName),
+				Tmtu:          natTunnelMTU,
+				VxlanPort:     testVxlanPort,
+				PSNatStart:    uint16(topts.psnaStart),
+				PSNatLen:      uint16(topts.psnatEnd-topts.psnaStart) + 1,
+				Flags:         libbpf.GlobalsNoDSRCidrs,
+				IfaceName:     setLogPrefix(topts.progLog + "-" + bpfIfaceName),
+				MaglevLUTSize: testMaglevLUTSize,
 			}
 			if topts.ipv6 {
 				copy(globals.HostTunnelIPv6[:], node1tunIPV6.To16())
@@ -925,11 +974,18 @@ func objUTLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHos
 		}
 		pin := "/sys/fs/bpf/tc/globals/" + m.Name()
 		log.WithField("pin", pin).Debug("Pinning map")
-		cmd := exec.Command("bpftool", "map", "show", "pinned", pin)
-		log.WithField("cmd", cmd.String()).Debugf("executing")
-		out, _ := cmd.Output()
-		log.WithField("output", string(out)).Debug("map")
-		log.WithField("size", m.MaxEntries()).Debug("libbpf map")
+		fd, err := maps.GetMapFDByPin(pin)
+		if err != nil {
+			log.WithError(err).Debug("error getting map FD by pin")
+		} else {
+			mapInfo, err := maps.GetMapInfo(fd)
+			if err != nil {
+				log.WithError(err).Debug("error getting mapInfo by FD")
+			} else {
+				log.WithFields(log.Fields{"Type": mapInfo.Type, "MaxEntries": mapInfo.MaxEntries, "ValueSize": mapInfo.ValueSize, "KeySize": mapInfo.KeySize}).Debug("existing map")
+			}
+		}
+		log.WithFields(log.Fields{"Type": m.Type(), "MaxEntries": m.MaxEntries(), "ValueSize": m.ValueSize(), "KeySize": m.KeySize()}).Debug("new map")
 		if err := m.SetPinPath(pin); err != nil {
 			obj.Close()
 			return nil, fmt.Errorf("error pinning map %s: %w", m.Name(), err)
@@ -1127,18 +1183,22 @@ func runBpfUnitTest(t *testing.T, source string, testFn func(bpfProgRunFn), opts
 }
 
 type testOpts struct {
-	description     string
-	subtests        bool
-	logLevel        log.Level
-	xdp             bool
-	psnaStart       uint32
-	psnatEnd        uint32
-	hostNetworked   bool
-	fromHost        bool
-	progLog         string
-	ipv6            bool
-	objname         string
-	flowLogsEnabled bool
+	description          string
+	subtests             bool
+	logLevel             log.Level
+	xdp                  bool
+	psnaStart            uint32
+	psnatEnd             uint32
+	hostNetworked        bool
+	fromHost             bool
+	progLog              string
+	ipv6                 bool
+	objname              string
+	flowLogsEnabled      bool
+	natOutExcludeHosts   bool
+	ingressQoSPacketRate bool
+	egressQoSPacketRate  bool
+	dscp                 int8
 }
 
 type testOption func(opts *testOpts)
@@ -1191,6 +1251,30 @@ func withIPv6() testOption {
 func withFlowLogs() testOption {
 	return func(o *testOpts) {
 		o.flowLogsEnabled = true
+	}
+}
+
+func withNATOutExcludeHosts() testOption {
+	return func(o *testOpts) {
+		o.natOutExcludeHosts = true
+	}
+}
+
+func withIngressQoSPacketRate() testOption {
+	return func(o *testOpts) {
+		o.ingressQoSPacketRate = true
+	}
+}
+
+func withEgressQoSPacketRate() testOption {
+	return func(o *testOpts) {
+		o.egressQoSPacketRate = true
+	}
+}
+
+func withEgressDSCP(value int8) testOption {
+	return func(o *testOpts) {
+		o.dscp = value
 	}
 }
 
@@ -1317,6 +1401,42 @@ func tcpResponseRaw(in []byte) []byte {
 	return out.Bytes()
 }
 
+func tcpResponseRawV6(in []byte) []byte {
+	pkt := gopacket.NewPacket(in, layers.LayerTypeEthernet, gopacket.Default)
+	ethL := pkt.Layer(layers.LayerTypeEthernet)
+	ethR := ethL.(*layers.Ethernet)
+	ethR.SrcMAC, ethR.DstMAC = ethR.DstMAC, ethR.SrcMAC
+
+	ipv6L := pkt.Layer(layers.LayerTypeIPv6)
+	ipv6R := ipv6L.(*layers.IPv6)
+	ipv6R.SrcIP, ipv6R.DstIP = ipv6R.DstIP, ipv6R.SrcIP
+
+	tcpL := pkt.Layer(layers.LayerTypeTCP)
+	tcpR := tcpL.(*layers.TCP)
+	tcpR.SrcPort, tcpR.DstPort = tcpR.DstPort, tcpR.SrcPort
+
+	if tcpR.SYN {
+		tcpR.ACK = true
+	}
+
+	_ = tcpR.SetNetworkLayerForChecksum(ipv6R)
+
+	out := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(out, gopacket.SerializeOptions{ComputeChecksums: true},
+		ethR, ipv6R, tcpR, gopacket.Payload(pkt.ApplicationLayer().Payload()))
+	Expect(err).NotTo(HaveOccurred())
+
+	return out.Bytes()
+}
+
+func dumpMaglevMap(mgMap maps.Map) {
+	m, err := nat.LoadMaglevMap(mgMap)
+	Expect(err).NotTo(HaveOccurred())
+	for k, v := range m {
+		fmt.Printf("%s: %s\n", k, v)
+	}
+}
+
 func dumpNATMap(natMap maps.Map) {
 	nt, err := nat.LoadFrontendMap(natMap)
 	Expect(err).NotTo(HaveOccurred())
@@ -1418,6 +1538,10 @@ func resetRTMapV6(rtMap maps.Map) {
 	resetMap(rtMap)
 }
 
+func resetQoSMap(qosMap maps.Map) {
+	resetMap(qosMap)
+}
+
 func saveRTMap(rtMap maps.Map) routes.MapMem {
 	rt, err := routes.LoadMap(rtMap)
 	Expect(err).NotTo(HaveOccurred())
@@ -1433,6 +1557,20 @@ func saveRTMapV6(rtMap maps.Map) routes.MapMemV6 {
 func restoreRTMap(rtMap maps.Map, m routes.MapMem) {
 	for k, v := range m {
 		err := rtMap.Update(k[:], v[:])
+		Expect(err).NotTo(HaveOccurred())
+	}
+}
+
+func restoreARPMap(arpMap maps.Map, a arp.MapMem) {
+	for k, v := range a {
+		err := arpMap.Update(k[:], v[:])
+		Expect(err).NotTo(HaveOccurred())
+	}
+}
+
+func restoreARPMapV6(arpMap maps.Map, a arp.MapMemV6) {
+	for k, v := range a {
+		err := arpMap.Update(k[:], v[:])
 		Expect(err).NotTo(HaveOccurred())
 	}
 }
@@ -1499,8 +1637,8 @@ var ipv4Default = &layers.IPv4{
 	Protocol: layers.IPProtocolUDP,
 }
 
-var srcIPv6 = net.IP([]byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
-var dstIPv6 = net.IP([]byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})
+var srcIPv6 = net.IP([]byte{0x20, 0x1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+var dstIPv6 = net.IP([]byte{0x20, 0x1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})
 var srcV6CIDR = ip.CIDRFromNetIP(srcIPv6).(ip.V6CIDR)
 var dstV6CIDR = ip.CIDRFromNetIP(dstIPv6).(ip.V6CIDR)
 
@@ -1528,6 +1666,7 @@ func testPacket(family int, eth *layers.Ethernet, l3 gopacket.Layer, l4 gopacket
 		payload: payload,
 		ipv6ext: ipv6ext,
 	}
+
 	err := pkt.Generate()
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
@@ -1817,7 +1956,7 @@ func testPacketUDPDefault() (*layers.Ethernet, *layers.IPv4, gopacket.Layer, []b
 	return e, ip4.(*layers.IPv4), l4, p, b, err
 }
 
-func testPacketUDPDefaultNP(destIP net.IP) (*layers.Ethernet, *layers.IPv4, gopacket.Layer, []byte, []byte, error) {
+func testPacketUDPDefaultNPWithPayload(destIP net.IP, payload []byte) (*layers.Ethernet, *layers.IPv4, gopacket.Layer, []byte, []byte, error) {
 	if destIP == nil {
 		return testPacketUDPDefault()
 	}
@@ -1831,8 +1970,71 @@ func testPacketUDPDefaultNP(destIP net.IP) (*layers.Ethernet, *layers.IPv4, gopa
 	}}
 	ip.IHL += 2
 
-	e, ip4, l4, p, b, err := testPacket(4, nil, &ip, nil, nil)
+	e, ip4, l4, p, b, err := testPacket(4, nil, &ip, nil, payload)
 	return e, ip4.(*layers.IPv4), l4, p, b, err
+}
+
+func testPacketTCPV4WithPayload(destIP net.IP, srcPort, dstPort uint16, syn bool, payload []byte) (*layers.Ethernet, *layers.IPv4, *layers.TCP, []byte, []byte, error) {
+	if destIP == nil {
+		log.Panic("destIP must be set")
+	}
+
+	ip := *ipv4Default
+	ip.DstIP = destIP
+	tcp := &layers.TCP{
+		SYN:        syn,
+		SrcPort:    layers.TCPPort(srcPort),
+		DstPort:    layers.TCPPort(dstPort),
+		DataOffset: 5,
+		// Window:  14600,
+	}
+
+	// ip.Options = []layers.IPv4Option{{
+	// 	OptionType:   123,
+	// 	OptionLength: 6,
+	// 	OptionData:   []byte{0xde, 0xad, 0xbe, 0xef},
+	// }}
+	// ip.IHL += 2
+
+	e, ip4, l4, p, b, err := testPacket(4, nil, &ip, tcp, payload, nil)
+	return e, ip4.(*layers.IPv4), l4.(*layers.TCP), p, b, err
+}
+
+func testPacketTCPV4DefaultNP(destIP net.IP, syn bool) (*layers.Ethernet, *layers.IPv4, *layers.TCP, []byte, []byte, error) {
+	return testPacketTCPV4WithPayload(destIP, 1234, 5678, syn, nil)
+}
+
+func testPacketTCPV6WithPayload(destIP net.IP, srcPort, dstPort uint16, syn bool, payload []byte) (*layers.Ethernet, *layers.IPv6, *layers.TCP, []byte, []byte, error) {
+	if destIP == nil {
+		panic("destIP cannot be nil")
+	}
+
+	ip := *ipv6Default
+	ip.NextHeader = layers.IPProtocolTCP
+	ip.DstIP = destIP
+
+	tcp := &layers.TCP{
+		SYN:        syn,
+		SrcPort:    layers.TCPPort(srcPort),
+		DstPort:    layers.TCPPort(dstPort),
+		DataOffset: 5,
+		// Window:  14600,
+	}
+
+	hop := &layers.IPv6HopByHop{}
+	hop.NextHeader = layers.IPProtocolTCP
+	/* from gopacket ip6_test.go */
+	tlv := &layers.IPv6HopByHopOption{}
+	tlv.OptionType = 0x01 // PadN
+	tlv.OptionData = []byte{0x00, 0x00, 0x00, 0x00}
+	hop.Options = append(hop.Options, tlv)
+
+	e, ip6, l4, p, b, err := testPacketV6(nil, &ip, tcp, payload, hop)
+	return e, ip6, l4.(*layers.TCP), p, b, err
+}
+
+func testPacketTCPV6DefaultNP(destIP net.IP, syn bool) (*layers.Ethernet, *layers.IPv6, *layers.TCP, []byte, []byte, error) {
+	return testPacketTCPV6WithPayload(destIP, 1234, 5678, syn, nil)
 }
 
 func ipv6HopByHopExt() gopacket.SerializableLayer {
@@ -1848,7 +2050,11 @@ func ipv6HopByHopExt() gopacket.SerializableLayer {
 	return hop
 }
 
-func testPacketUDPDefaultNPV6(destIP net.IP) (*layers.Ethernet, *layers.IPv6, gopacket.Layer, []byte, []byte, error) {
+func testPacketUDPDefaultNP(destIP net.IP) (*layers.Ethernet, *layers.IPv4, gopacket.Layer, []byte, []byte, error) {
+	return testPacketUDPDefaultNPWithPayload(destIP, nil)
+}
+
+func testPacketUDPDefaultNPV6WithPayload(destIP net.IP, payload []byte) (*layers.Ethernet, *layers.IPv6, gopacket.Layer, []byte, []byte, error) {
 	if destIP == nil {
 		return testPacketV6(nil, nil, nil, nil)
 	}
@@ -1865,8 +2071,12 @@ func testPacketUDPDefaultNPV6(destIP net.IP) (*layers.Ethernet, *layers.IPv6, go
 	tlv.OptionData = []byte{0x00, 0x00, 0x00, 0x00}
 	hop.Options = append(hop.Options, tlv)
 
-	e, ip6, l4, p, b, err := testPacketV6(nil, &ip, nil, nil, hop)
+	e, ip6, l4, p, b, err := testPacketV6(nil, &ip, nil, payload, hop)
 	return e, ip6, l4, p, b, err
+}
+
+func testPacketUDPDefaultNPV6(destIP net.IP) (*layers.Ethernet, *layers.IPv6, gopacket.Layer, []byte, []byte, error) {
+	return testPacketUDPDefaultNPV6WithPayload(destIP, nil)
 }
 
 func resetBPFMaps() {
@@ -1875,6 +2085,8 @@ func resetBPFMaps() {
 	resetMap(fsafeMap)
 	resetMap(natMap)
 	resetMap(natBEMap)
+	resetMap(qosMap)
+	resetMap(maglevMap)
 }
 
 func TestMapIterWithDelete(t *testing.T) {
@@ -1931,7 +2143,7 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 		Type:       "hash",
 		KeySize:    8,
 		ValueSize:  8,
-		MaxEntries: 1000,
+		MaxEntries: 4 * maps.IteratorNumKeys,
 		Name:       "cali_tmap",
 		Flags:      unix.BPF_F_NO_PREALLOC,
 	})
@@ -1939,7 +2151,9 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 	err := m.EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
 
-	for i := 0; i < 40; i++ {
+	items := 3*maps.IteratorNumKeys + 5
+
+	for i := 0; i < items; i++ {
 		var k, v [8]byte
 
 		binary.LittleEndian.PutUint64(k[:], uint64(i))
@@ -1968,9 +2182,10 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect(cnt).To(Equal(40))
+	Expect(len(out)).To(Equal(items))
+	Expect(cnt).To(Equal(items))
 
-	for i := 0; i < 40; i++ {
+	for i := 0; i < items; i++ {
 		Expect(out).To(HaveKey(uint64(i)))
 		Expect(out[uint64(i)]).To(Equal(uint64(i * 7)))
 	}
@@ -1978,6 +2193,10 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 
 func TestJumpMap(t *testing.T) {
 	RegisterTestingT(t)
+
+	progMap = hook.NewProgramsMap()
+	err := progMap.EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
 
 	jumpMapFD := progMap.MapFD()
 	pg := polprog.NewBuilder(idalloc.New(), ipsMap.MapFD(), stateMap.MapFD(), jumpMapFD, policyJumpMap.MapFD(),

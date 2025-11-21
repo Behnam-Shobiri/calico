@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +24,7 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
-	cli "github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v3"
 
 	"github.com/projectcalico/calico/release/internal/outputs"
 	"github.com/projectcalico/calico/release/internal/pinnedversion"
@@ -41,10 +42,10 @@ func releaseOutputDir(repoRootDir, version string) string {
 // The release command suite is used to build and publish official releases.
 func releaseCommand(cfg *Config) *cli.Command {
 	return &cli.Command{
-		Name:        "release",
-		Aliases:     []string{"rel"},
-		Usage:       "Build and publish official releases.",
-		Subcommands: releaseSubCommands(cfg),
+		Name:     "release",
+		Aliases:  []string{"rel"},
+		Usage:    "Build and publish official releases.",
+		Commands: releaseSubCommands(cfg),
 	}
 }
 
@@ -55,7 +56,7 @@ func releaseSubCommands(cfg *Config) []*cli.Command {
 			Name:  "generate-release-notes",
 			Usage: "Generate release notes for the next release",
 			Flags: []cli.Flag{orgFlag, devTagSuffixFlag, githubTokenFlag},
-			Action: func(c *cli.Context) error {
+			Action: func(_ context.Context, c *cli.Command) error {
 				configureLogging("release-notes.log")
 
 				// Determine the versions to use for the release.
@@ -81,7 +82,7 @@ func releaseSubCommands(cfg *Config) []*cli.Command {
 			Name:  "build",
 			Usage: "Build an official release",
 			Flags: releaseBuildFlags(),
-			Action: func(c *cli.Context) error {
+			Action: func(_ context.Context, c *cli.Command) error {
 				configureLogging("release-build.log")
 
 				// Determine the versions to use for the release.
@@ -101,11 +102,13 @@ func releaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithVersion(ver.FormattedString()),
 					calico.WithOperatorVersion(operatorVer.FormattedString()),
 					calico.WithOutputDir(releaseOutputDir(cfg.RepoRootDir, ver.FormattedString())),
+					calico.WithTmpDir(cfg.TmpDir),
 					calico.WithArchitectures(c.StringSlice(archFlag.Name)),
 					calico.WithGithubOrg(c.String(orgFlag.Name)),
 					calico.WithRepoName(c.String(repoFlag.Name)),
 					calico.WithRepoRemote(c.String(repoRemoteFlag.Name)),
 					calico.WithBuildImages(c.Bool(buildImagesFlag.Name)),
+					calico.WithArchiveImages(c.Bool(archiveImagesFlag.Name)),
 				}
 				if c.Bool(skipValidationFlag.Name) {
 					opts = append(opts, calico.WithValidate(false))
@@ -124,7 +127,7 @@ func releaseSubCommands(cfg *Config) []*cli.Command {
 			Name:  "publish",
 			Usage: "Publish a pre-built release",
 			Flags: releasePublishFlags(),
-			Action: func(c *cli.Context) error {
+			Action: func(_ context.Context, c *cli.Command) error {
 				configureLogging("release-publish.log")
 
 				ver, operatorVer, err := version.VersionsFromManifests(cfg.RepoRootDir)
@@ -136,6 +139,7 @@ func releaseSubCommands(cfg *Config) []*cli.Command {
 					calico.WithVersion(ver.FormattedString()),
 					calico.WithOperatorVersion(operatorVer.FormattedString()),
 					calico.WithOutputDir(releaseOutputDir(cfg.RepoRootDir, ver.FormattedString())),
+					calico.WithTmpDir(cfg.TmpDir),
 					calico.WithGithubOrg(c.String(orgFlag.Name)),
 					calico.WithRepoName(c.String(repoFlag.Name)),
 					calico.WithRepoRemote(c.String(repoRemoteFlag.Name)),
@@ -172,7 +176,7 @@ func releasePublicSubCommands(cfg *Config) *cli.Command {
 			operatorRepoFlag,
 			operatorRepoRemoteFlag,
 		},
-		Action: func(c *cli.Context) error {
+		Action: func(_ context.Context, c *cli.Command) error {
 			configureLogging("release-public.log")
 			ver, operatorVer, err := version.VersionsFromManifests(cfg.RepoRootDir)
 			if err != nil {
@@ -209,6 +213,7 @@ func releaseBuildFlags() []cli.Flag {
 		archFlag,
 		registryFlag,
 		buildImagesFlag,
+		archiveImagesFlag,
 		githubTokenFlag,
 		skipValidationFlag)
 	return f
@@ -237,34 +242,12 @@ func releaseValidationSubCommand(cfg *Config) *cli.Command {
 			releaseBranchPrefixFlag,
 			githubTokenFlag,
 		},
-		Action: func(c *cli.Context) error {
+		Action: func(_ context.Context, c *cli.Command) error {
 			configureLogging("postrelease-validation.log")
 
 			ver, operatorVer, err := version.VersionsFromManifests(cfg.RepoRootDir)
 			if err != nil {
 				return err
-			}
-
-			pinnedCfg := pinnedversion.CalicoReleaseVersions{
-				Dir:                 cfg.TmpDir,
-				ProductVersion:      ver.FormattedString(),
-				ReleaseBranchPrefix: c.String(releaseBranchPrefixFlag.Name),
-				OperatorVersion:     operatorVer.FormattedString(),
-				OperatorCfg: pinnedversion.OperatorConfig{
-					Image:    operator.DefaultImage,
-					Registry: operator.DefaultRegistry,
-				},
-			}
-			if _, err := pinnedCfg.GenerateFile(); err != nil {
-				return fmt.Errorf("failed to generate pinned version file: %w", err)
-			}
-			images, err := pinnedCfg.ImageList()
-			if err != nil {
-				return fmt.Errorf("failed to get image list: %w", err)
-			}
-			flannelVer, err := pinnedCfg.FlannelVersion()
-			if err != nil {
-				return fmt.Errorf("failed to get flannel version: %w", err)
 			}
 
 			postreleaseDir := filepath.Join(cfg.RepoRootDir, utils.ReleaseFolderName, "pkg", "postrelease")
@@ -273,11 +256,11 @@ func releaseValidationSubCommand(cfg *Config) *cli.Command {
 				"--", "-v", "./...",
 				fmt.Sprintf("-release-version=%s", ver.FormattedString()),
 				fmt.Sprintf("-operator-version=%s", operatorVer.FormattedString()),
-				fmt.Sprintf("-flannel-version=%s", flannelVer),
+				fmt.Sprintf("-flannel-version=%s", pinnedversion.FlannelComponent.Version),
 				fmt.Sprintf("-github-org=%s", c.String(orgFlag.Name)),
 				fmt.Sprintf("-github-repo=%s", c.String(repoFlag.Name)),
 				fmt.Sprintf("-github-repo-remote=%s", c.String(repoRemoteFlag.Name)),
-				fmt.Sprintf("-images=%s", strings.Join(images, " ")),
+				fmt.Sprintf("-images=%s", strings.Join(utils.ReleaseImages(), " ")),
 			}
 			if c.String(githubTokenFlag.Name) != "" {
 				args = append(args, fmt.Sprintf("-github-token=%s", c.String(githubTokenFlag.Name)))

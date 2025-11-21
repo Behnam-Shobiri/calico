@@ -42,7 +42,7 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/maps"
 	"github.com/projectcalico/calico/felix/bpf/utils"
 	"github.com/projectcalico/calico/felix/environment"
-	"github.com/projectcalico/calico/felix/labelindex"
+	"github.com/projectcalico/calico/felix/labelindex/ipsetmember"
 	"github.com/projectcalico/calico/felix/proto"
 )
 
@@ -501,7 +501,7 @@ type cgroupProgEntry struct {
 }
 
 type ProtoPort struct {
-	Proto labelindex.IPSetPortProtocol
+	Proto ipsetmember.Protocol
 	Port  uint16
 }
 
@@ -576,7 +576,7 @@ func (b *BPFLib) DumpFailsafeMap() ([]ProtoPort, error) {
 		if err != nil {
 			return nil, err
 		}
-		pp = append(pp, ProtoPort{labelindex.IPSetPortProtocol(proto), port})
+		pp = append(pp, ProtoPort{ipsetmember.Protocol(proto), port})
 	}
 
 	return pp, nil
@@ -1297,19 +1297,19 @@ func hexToFailsafe(hexString []string) (proto uint8, port uint16, err error) {
 	}
 
 	if padding != 0 {
-		err = fmt.Errorf("invalid proto in hex string: %q\n", hexString[1])
+		err = fmt.Errorf("invalid proto in hex string: %q", hexString[2])
 		return
 	}
 
 	portMSB, err := hexToByte(hexString[2])
 	if err != nil {
-		err = fmt.Errorf("invalid port MSB in hex string: %q\n", hexString[2])
+		err = fmt.Errorf("invalid port MSB in hex string: %q", hexString[2])
 		return
 	}
 
 	portLSB, err := hexToByte(hexString[3])
 	if err != nil {
-		err = fmt.Errorf("invalid port LSB in hex string: %q\n", hexString[3])
+		err = fmt.Errorf("invalid port LSB in hex string: %q", hexString[3])
 		return
 	}
 
@@ -2257,6 +2257,7 @@ func MapPinDir() string {
 type TcList []struct {
 	DevName string `json:"devname"`
 	ID      int    `json:"id"`
+	ProgID  int    `json:"prog_id"`
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
 }
@@ -2298,7 +2299,6 @@ func ListTcXDPAttachedProgs(dev ...string) (TcList, XDPList, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse list of attached BPF programs: %w\n%s", err, out)
 	}
-
 	return attached[0].TC, attached[0].XDP, nil
 }
 
@@ -2351,12 +2351,37 @@ func IterPerCpuMapCmdOutput(output []byte, f func(k, v []byte)) error {
 	return nil
 }
 
+type ObjectConfigurator func(obj *libbpf.Obj) error
+
 func LoadObject(file string, data libbpf.GlobalData, mapsToBePinned ...string) (*libbpf.Obj, error) {
+	return LoadObjectWithOptions(file, data, nil, mapsToBePinned...)
+}
+
+func LoadObjectWithOptions(file string, data libbpf.GlobalData, configurator ObjectConfigurator, mapsToBePinned ...string) (*libbpf.Obj, error) {
 	obj, err := libbpf.OpenObject(file)
 	if err != nil {
 		return nil, err
 	}
 
+	if configurator != nil {
+		if err := configurator(obj); err != nil {
+			return nil, err
+		}
+	}
+
+	return loadObject(obj, data, mapsToBePinned...)
+}
+
+func LoadObjectWithLogBuffer(file string, data libbpf.GlobalData, logBuf []byte, mapsToBePinned ...string) (*libbpf.Obj, error) {
+	obj, err := libbpf.OpenObjectWithLogBuffer(file, logBuf)
+	if err != nil {
+		return nil, err
+	}
+
+	return loadObject(obj, data, mapsToBePinned...)
+}
+
+func loadObject(obj *libbpf.Obj, data libbpf.GlobalData, mapsToBePinned ...string) (*libbpf.Obj, error) {
 	success := false
 	defer func() {
 		if !success {
@@ -2373,12 +2398,14 @@ func LoadObject(file string, data libbpf.GlobalData, mapsToBePinned ...string) (
 		// userspace before the program is loaded.
 		mapName := m.Name()
 		if m.IsMapInternal() {
-			if strings.HasPrefix(mapName, ".rodata") {
+			if !strings.HasSuffix(mapName, ".rodata") {
 				continue
 			}
 
-			if err := data.Set(m); err != nil {
-				return nil, fmt.Errorf("failed to configure %s: %w", file, err)
+			if data != nil {
+				if err := data.Set(m); err != nil {
+					return nil, fmt.Errorf("failed to configure %s map %s: %w", obj.Filename(), mapName, err)
+				}
 			}
 			continue
 		}
@@ -2389,7 +2416,7 @@ func LoadObject(file string, data libbpf.GlobalData, mapsToBePinned ...string) (
 			}
 		}
 
-		log.Debugf("Pinning file %s map %s k %d v %d", file, mapName, m.KeySize(), m.ValueSize())
+		log.Debugf("Pinning map %s k %d v %d", mapName, m.KeySize(), m.ValueSize())
 		pinDir := MapPinDir()
 		// If mapsToBePinned is not specified, pin all the maps.
 		if len(mapsToBePinned) == 0 {

@@ -23,11 +23,11 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
-	"github.com/projectcalico/go-yaml-wrapper"
 	log "github.com/sirupsen/logrus"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/yaml"
 
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
 	"github.com/projectcalico/calico/libcalico-go/lib/watch"
@@ -164,12 +164,13 @@ func (t *testResourceWatcher) ExpectEvents(kind string, expectedEvents []watch.E
 // ExpectEventsAnyOrder validates the received events match those expected but the order
 // is not necessarily fixed.  KDD watch without a resource version does not appear to be
 // deterministic in the order of events from the initial "list".
-//
-// This should be called within a Ginkgo test, and should only be called when listing the
-// current snapshot - it should only include added event types.
 func (t *testResourceWatcher) ExpectEventsAnyOrder(kind string, expectedEvents []watch.Event) {
+	var establishedType *watch.EventType
 	for _, e := range expectedEvents {
-		Expect(e.Type).To(Equal(watch.Added))
+		if establishedType != nil && *establishedType != e.Type {
+			Fail("ExpectEventsAnyOrder should only be used with a set of events of the same type")
+		}
+		establishedType = &e.Type
 	}
 	t.expectEvents(kind, true, expectedEvents)
 }

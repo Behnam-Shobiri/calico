@@ -16,6 +16,7 @@ package hook
 
 import (
 	"strings"
+	"sync"
 
 	tcdefs "github.com/projectcalico/calico/felix/bpf/tc/defs"
 	bpfutils "github.com/projectcalico/calico/felix/bpf/utils"
@@ -71,13 +72,12 @@ type AttachType struct {
 	Family     int
 	Type       tcdefs.EndpointType
 	LogLevel   string
-	FIB        bool
 	ToHostDrop bool
 	DSR        bool
 }
 
 func (at AttachType) ObjectFile() string {
-	return objectFiles[at]
+	return ObjectFile(at)
 }
 
 func (at AttachType) hasHostConflictProg() bool {
@@ -102,6 +102,10 @@ func (at AttachType) hasIPDefrag() bool {
 	return at.Hook == Ingress
 }
 
+func (at AttachType) hasMaglev() bool {
+	return at.Type == tcdefs.EpTypeHost && at.Hook == Ingress
+}
+
 type DefPolicy int
 
 const (
@@ -122,53 +126,67 @@ func (at AttachType) DefaultPolicy() DefPolicy {
 	return DefPolicyDeny
 }
 
-var objectFiles = make(map[AttachType]string)
+var (
+	objectFilesLock sync.Mutex
+	objectFiles     = make(map[AttachType]string)
+)
+
+func ObjectFile(at AttachType) string {
+	objectFilesLock.Lock()
+	defer objectFilesLock.Unlock()
+
+	return objectFiles[at]
+}
+
+func SetObjectFile(at AttachType, file string) {
+	objectFilesLock.Lock()
+	defer objectFilesLock.Unlock()
+
+	objectFiles[at] = file
+}
 
 func initObjectFiles() {
 	for _, family := range []int{4, 6} {
 		for _, logLevel := range []string{"off", "debug"} {
 			for _, epToHostDrop := range []bool{false, true} {
 				epToHostDrop := epToHostDrop
-				for _, fibEnabled := range []bool{false, true} {
-					fibEnabled := fibEnabled
-					epTypes := []tcdefs.EndpointType{
-						tcdefs.EpTypeWorkload,
-						tcdefs.EpTypeHost,
-						tcdefs.EpTypeIPIP,
-						tcdefs.EpTypeL3Device,
-						tcdefs.EpTypeNAT,
-						tcdefs.EpTypeLO,
-						tcdefs.EpTypeVXLAN,
-					}
-					for _, epType := range epTypes {
-						epType := epType
-						for _, hook := range []Hook{Ingress, Egress} {
-							hook := hook
-							for _, dsr := range []bool{false, true} {
-								toOrFrom := tcdefs.ToEp
-								if hook == Ingress {
-									toOrFrom = tcdefs.FromEp
-								}
-
-								objectFiles[AttachType{
-									Family:     family,
-									Type:       epType,
-									Hook:       hook,
-									ToHostDrop: epToHostDrop,
-									FIB:        fibEnabled,
-									DSR:        dsr,
-									LogLevel:   logLevel,
-								}] = tcdefs.ProgFilename(
-									family,
-									epType,
-									toOrFrom,
-									epToHostDrop,
-									fibEnabled,
-									dsr,
-									logLevel,
-									bpfutils.BTFEnabled,
-								)
+				epTypes := []tcdefs.EndpointType{
+					tcdefs.EpTypeWorkload,
+					tcdefs.EpTypeHost,
+					tcdefs.EpTypeIPIP,
+					tcdefs.EpTypeL3Device,
+					tcdefs.EpTypeNAT,
+					tcdefs.EpTypeLO,
+					tcdefs.EpTypeVXLAN,
+				}
+				for _, epType := range epTypes {
+					epType := epType
+					for _, hook := range []Hook{Ingress, Egress} {
+						hook := hook
+						for _, dsr := range []bool{false, true} {
+							toOrFrom := tcdefs.ToEp
+							if hook == Ingress {
+								toOrFrom = tcdefs.FromEp
 							}
+
+							attachType := AttachType{
+								Family:     family,
+								Type:       epType,
+								Hook:       hook,
+								ToHostDrop: epToHostDrop,
+								DSR:        dsr,
+								LogLevel:   logLevel,
+							}
+							filename := tcdefs.ProgFilename(
+								family,
+								epType,
+								toOrFrom,
+								epToHostDrop,
+								dsr,
+								logLevel,
+								bpfutils.BTFEnabled,
+							)
+							SetObjectFile(attachType, filename)
 						}
 					}
 				}
@@ -187,16 +205,19 @@ func initObjectFiles() {
 				filename = "xdp_" + l + "_co-re_v6.o"
 			}
 
-			objectFiles[AttachType{
+			SetObjectFile(AttachType{
 				Family:   family,
 				Hook:     XDP,
 				LogLevel: logLevel,
-			}] = filename
+			}, filename)
 		}
 	}
 }
 
 func ListAttachTypes() []AttachType {
+	objectFilesLock.Lock()
+	defer objectFilesLock.Unlock()
+
 	var ret []AttachType
 
 	for at := range objectFiles {

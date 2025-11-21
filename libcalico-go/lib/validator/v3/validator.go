@@ -1244,6 +1244,41 @@ func validateIPPoolSpec(structLevel validator.StructLevel) {
 		structLevel.ReportError(reflect.ValueOf(pool.CIDR),
 			"IPpool.NodeSelector", "", reason("IP Pool with AllowedUse LoadBalancer must have node selector set to all()"), "")
 	}
+
+	// Check for invalid combination: Tunnel allowedUse with namespaceSelector
+	hasTunnelUse := false
+	for _, use := range pool.AllowedUses {
+		if use == api.IPPoolAllowedUseTunnel {
+			hasTunnelUse = true
+			break
+		}
+	}
+
+	if hasTunnelUse && pool.NamespaceSelector != "" {
+		structLevel.ReportError(reflect.ValueOf(pool.NamespaceSelector),
+			"IPpool.NamespaceSelector", "", reason("IP Pool with AllowedUse Tunnel cannot have namespaceSelector specified - tunnel IPs are not namespaced resources"), "")
+	}
+
+	// Enhanced validation for NodeSelector based on Calico selector reference
+	if pool.NodeSelector != "" {
+
+		// Check for invalid global() selector in nodeSelector context
+		if strings.Contains(pool.NodeSelector, "global(") {
+			structLevel.ReportError(reflect.ValueOf(pool.NodeSelector),
+				"IPpool.NodeSelector", "", reason("global() selector is not valid for IPPool nodeSelector - use all() instead"), "")
+		}
+	}
+
+	// Enhanced validation for NamespaceSelector based on Calico selector reference
+	if pool.NamespaceSelector != "" {
+
+		// Check for invalid global() selector in namespaceSelector context
+		if strings.Contains(pool.NamespaceSelector, "global(") {
+			structLevel.ReportError(reflect.ValueOf(pool.NamespaceSelector),
+				"IPpool.NamespaceSelector", "", reason("global() selector is not valid for IPPool namespaceSelector - use all() instead"), "")
+		}
+
+	}
 }
 
 func vxLanModeEnabled(mode api.VXLANMode) bool {
@@ -1319,6 +1354,7 @@ func validateRule(structLevel validator.StructLevel) {
 
 	scanNets := func(nets []string, fieldName string) {
 		var v4, v6 bool
+		isNegatedField := fieldName == "Source.NotNets" || fieldName == "Destination.NotNets"
 		for _, n := range nets {
 			_, cidr, err := cnet.ParseCIDR(n)
 			if err != nil {
@@ -1327,6 +1363,16 @@ func validateRule(structLevel validator.StructLevel) {
 			} else {
 				v4 = v4 || cidr.Version() == 4
 				v6 = v6 || cidr.Version() == 6
+
+				// Check for catch-all CIDR in negated context, which creates logical contradictions
+				if isNegatedField {
+					if (cidr.Version() == 4 && n == "0.0.0.0/0") ||
+						(cidr.Version() == 6 && cidr.Mask.String() == cnet.MustParseCIDR("::/0").Mask.String() &&
+							cidr.IP.Equal(cnet.MustParseCIDR("::/0").IP)) {
+						structLevel.ReportError(reflect.ValueOf(n), fieldName,
+							"", reason("catch-all CIDR in negation creates logical contradiction (matches no traffic)"), "")
+					}
+				}
 			}
 		}
 		if rule.IPVersion != nil && ((v4 && *rule.IPVersion != 4) || (v6 && *rule.IPVersion != 6)) {
@@ -1686,6 +1732,30 @@ func validateTier(structLevel validator.StructLevel) {
 				"TierSpec.Order",
 				"",
 				reason(fmt.Sprintf("baselineadminnetworkpolicy tier order must be %v", api.BaselineAdminNetworkPolicyTierOrder)),
+				"",
+			)
+		}
+	}
+
+	if tier.Name == names.KubeAdminTierName {
+		if tier.Spec.Order == nil || *tier.Spec.Order != api.KubeAdminTierOrder {
+			structLevel.ReportError(
+				reflect.ValueOf(tier.Spec.Order),
+				"TierSpec.Order",
+				"",
+				reason(fmt.Sprintf("kube-admin tier order must be %v", api.KubeAdminTierOrder)),
+				"",
+			)
+		}
+	}
+
+	if tier.Name == names.KubeBaselineTierName {
+		if tier.Spec.Order == nil || *tier.Spec.Order != api.KubeBaselineTierOrder {
+			structLevel.ReportError(
+				reflect.ValueOf(tier.Spec.Order),
+				"TierSpec.Order",
+				"",
+				reason(fmt.Sprintf("kube-baseline tier order must be %v", api.KubeBaselineTierOrder)),
 				"",
 			)
 		}

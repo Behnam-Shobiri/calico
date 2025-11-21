@@ -98,12 +98,12 @@ func (r kubeControllersConfiguration) validateAndFillDefaults(res *apiv3.KubeCon
 				}
 				templateName[template.GenerateName] = true
 
-				// CIDR can't be empty
-				if len(template.InterfaceCIDRs) == 0 {
+				// At least InterfaceCIDRs or InterfacePattern has to be set
+				if len(template.InterfaceCIDRs) == 0 && template.InterfacePattern == "" {
 					return cerrors.ErrorValidation{
 						ErroredFields: []cerrors.ErroredField{{
 							Name:   "KubeControllersConfiguration.Node.HostEndpoint.Templates." + template.GenerateName,
-							Reason: "CIDR can not be empty",
+							Reason: "InterfaceCIDRs or InterfacePattern must be specified",
 						}},
 					}
 				}

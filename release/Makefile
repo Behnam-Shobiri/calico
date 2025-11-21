@@ -6,16 +6,20 @@ include ../lib.Makefile
 
 export ORGANIZATION
 export GIT_REPO
-export GIT_REPO_SLUG
+export RELEASE_BRANCH_PREFIX
+export DEV_TAG_SUFFIX
 export DEV_REGISTRIES
+export OPERATOR_ORGANIZATION
+export OPERATOR_GIT_REPO
 export OPERATOR_BRANCH
 
 .PHONY: build
 build: bin/release
 
 clean:
-	@rm -rf ./bin
-	@rm -rf ./output ./_output ./tmp ./*.log
+	@rm -rf ./bin ./output ./_output ./report ./tmp
+	@find ../ -name '*release*.log' -delete
+	@find . -name '*.received.*' -delete
 
 bin/release: $(shell find . -name "*.go")
 	@mkdir -p bin && \
@@ -24,7 +28,9 @@ bin/release: $(shell find . -name "*.go")
 POSTRELEASE_TEST_PACKAGE		:= $(PACKAGE_NAME)/pkg/postrelease
 UNIT_TEST_PACKAGES	:= $(shell go list ./... | grep -v $(POSTRELEASE_TEST_PACKAGE))
 ut:
-	$(DOCKER_GO_BUILD) go test $(UNIT_TEST_PACKAGES) -v -cover -count 1
+	@mkdir -p report
+	@$(DOCKER_GO_BUILD) gotestsum --junitfile report/unit-tests.xml \
+		-- -coverprofile=report/coverage.out $(UNIT_TEST_PACKAGES)
 
 ###############################################################################
 # CI/CD

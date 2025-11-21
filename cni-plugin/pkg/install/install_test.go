@@ -32,7 +32,8 @@ var expectedDefaultConfig string = `{
       "mtu": 1500,
       "ipam": {"type": "calico-ipam"},
       "policy": {"type": "k8s"},
-      "kubernetes": {"kubeconfig": "/etc/cni/net.d/calico-kubeconfig"}
+      "kubernetes": {"kubeconfig": "/etc/cni/net.d/calico-kubeconfig"},
+      "require_mtu_file": false
     },
     {
       "type": "portmap",
@@ -236,7 +237,7 @@ PuB/TL+u2y+iQUyXxLy3
 
 	AfterEach(func() {
 		// Cleanup temp directory
-		os.RemoveAll(tempDir)
+		_ = os.RemoveAll(tempDir)
 		// Cleanup calico-node service account
 		err := createKubernetesClient().CoreV1().ServiceAccounts("kube-system").Delete(context.Background(), "calico-cni-plugin", metav1.DeleteOptions{})
 		Expect(err).NotTo(HaveOccurred())
@@ -416,7 +417,7 @@ var _ = Describe("file comparison tests", func() {
 
 	AfterEach(func() {
 		// Cleanup temp directory
-		os.RemoveAll(tempDir)
+		_ = os.RemoveAll(tempDir)
 	})
 
 	It("should compare two equal files", func() {

@@ -719,6 +719,9 @@ static CALI_BPF_INLINE struct calico_ct_result calico_ct_lookup(struct cali_tc_c
 		CALI_CT_DEBUG("Hit! NAT FWD entry, doing secondary lookup.");
 		tracking_v = cali_ct_lookup_elem(&v->nat_rev_key);
 		if (!tracking_v) {
+			// The secondary entry might have been deleted because of LRU.
+			// Hence it is better to delete the fwd entry.
+			cali_ct_delete_elem(&k);
 			CALI_CT_DEBUG("Miss when looking for secondary entry.");
 			goto out_lookup_fail;
 		}
@@ -785,7 +788,13 @@ static CALI_BPF_INLINE struct calico_ct_result calico_ct_lookup(struct cali_tc_c
 				!ip_equal(result.tun_ip, ctx->state->tun_ip)) {
 			CALI_CT_DEBUG("tunnel src changed from " IP_FMT " to " IP_FMT "",
 					debug_ip(result.tun_ip), debug_ip(ctx->state->tun_ip));
+
 			ct_result_set_flag(result.rc, CT_RES_TUN_SRC_CHANGED);
+
+			if (result.flags & CALI_CT_FLAG_MAGLEV) {
+				CALI_DEBUG("overwriting tunnel src for Maglev packet");
+				tracking_v->tun_ip = ctx->state->tun_ip;
+			}
 		}
 
 		if (tracking_v->a_to_b.approved && tracking_v->b_to_a.approved) {
@@ -940,7 +949,7 @@ static CALI_BPF_INLINE struct calico_ct_result calico_ct_lookup(struct cali_tc_c
 			 * to invoke policy.
 			 */
 			CALI_CT_DEBUG("Packet not allowed by ingress/egress approval flags (TH).");
-			result.rc = tcp_header ? CALI_CT_INVALID : CALI_CT_NEW;
+			result.rc = (tcp_header && !syn) ? CALI_CT_INVALID : CALI_CT_NEW;
 		}
 	} else if (CALI_F_FROM_HOST) {
 		/* Dest of the packet is the endpoint, so check the dest approval flag. */
@@ -1034,10 +1043,11 @@ static CALI_BPF_INLINE struct calico_ct_result calico_ct_lookup(struct cali_tc_c
 					src_to_dst->ifindex = ifindex;
 				}
 				break;
+			case RPF_RES_DISABLED:
 			case RPF_RES_LOOSE:
 				if (!related) {
-					CALI_CT_DEBUG("Packet from unexpected ingress dev - rpf loose - reset ifindex",
-							src_to_dst->ifindex, ifindex);
+					CALI_CT_DEBUG("Packet from unexpected ingress dev - rpf loose or disabled "
+							"- reset ifindex", src_to_dst->ifindex, ifindex);
 					src_to_dst->ifindex = CT_INVALID_IFINDEX;
 				}
 				break;

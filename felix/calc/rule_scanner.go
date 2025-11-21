@@ -18,10 +18,11 @@ import (
 	"fmt"
 	"strings"
 
+	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	"github.com/projectcalico/api/pkg/lib/numorstring"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/projectcalico/calico/felix/labelindex"
+	"github.com/projectcalico/calico/felix/labelindex/ipsetmember"
 	"github.com/projectcalico/calico/felix/multidict"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
@@ -77,7 +78,7 @@ type IPSetData struct {
 
 	// NamedPortProtocol identifies the protocol (TCP or UDP) for a named port IP set.  It is
 	// set to ProtocolNone for a selector-only IP set.
-	NamedPortProtocol labelindex.IPSetPortProtocol
+	NamedPortProtocol ipsetmember.Protocol
 	// NamedPort contains the name of the named port represented by this IP set or "" for a
 	// selector-only IP set
 	NamedPort string
@@ -123,7 +124,7 @@ func (d *IPSetData) UniqueID() string {
 		} else {
 			// Selector / named-port based IP set.
 			selID := d.Selector.UniqueID()
-			if d.NamedPortProtocol == labelindex.ProtocolNone {
+			if d.NamedPortProtocol == ipsetmember.ProtocolNone {
 				d.cachedUID = selID
 			} else {
 				idToHash := selID + "," + d.NamedPortProtocol.String() + "," + d.NamedPort
@@ -137,7 +138,7 @@ func (d *IPSetData) UniqueID() string {
 // DataplaneProtocolType returns the dataplane driver protocol type of this IP set.
 // One of the proto.IPSetUpdate_IPSetType constants.
 func (d *IPSetData) DataplaneProtocolType() proto.IPSetUpdate_IPSetType {
-	if d.NamedPortProtocol != labelindex.ProtocolNone {
+	if d.NamedPortProtocol != ipsetmember.ProtocolNone {
 		return proto.IPSetUpdate_IP_AND_PORT
 	}
 	if d.Service != "" {
@@ -158,12 +159,12 @@ func NewRuleScanner() *RuleScanner {
 }
 
 func (rs *RuleScanner) OnProfileActive(key model.ProfileRulesKey, profile *model.ProfileRules) {
-	parsedRules := rs.updateRules(key, profile.InboundRules, profile.OutboundRules, false, false, "", "")
+	parsedRules := rs.updateRules(key, profile.InboundRules, profile.OutboundRules, false, false, "", "", nil)
 	rs.RulesUpdateCallbacks.OnProfileActive(key, parsedRules)
 }
 
 func (rs *RuleScanner) OnProfileInactive(key model.ProfileRulesKey) {
-	rs.updateRules(key, nil, nil, false, false, "", "")
+	rs.updateRules(key, nil, nil, false, false, "", "", nil)
 	rs.RulesUpdateCallbacks.OnProfileInactive(key)
 }
 
@@ -176,12 +177,13 @@ func (rs *RuleScanner) OnPolicyActive(key model.PolicyKey, policy *model.Policy)
 		policy.PreDNAT,
 		policy.Namespace,
 		selector.Normalise(policy.Selector),
+		policy.PerformanceHints,
 	)
 	rs.RulesUpdateCallbacks.OnPolicyActive(key, parsedRules)
 }
 
 func (rs *RuleScanner) OnPolicyInactive(key model.PolicyKey) {
-	rs.updateRules(key, nil, nil, false, false, "", "")
+	rs.updateRules(key, nil, nil, false, false, "", "", nil)
 	rs.RulesUpdateCallbacks.OnPolicyInactive(key)
 }
 
@@ -191,6 +193,7 @@ func (rs *RuleScanner) updateRules(
 	untracked, preDNAT bool,
 	origNamespace string,
 	origSelector string,
+	perfHints []apiv3.PolicyPerformanceHint,
 ) (parsedRules *ParsedRules) {
 	log.Debugf("Scanning rules (%v in, %v out) for key %v",
 		len(inbound), len(outbound), key)
@@ -225,6 +228,7 @@ func (rs *RuleScanner) updateRules(
 		Untracked:        untracked,
 		PreDNAT:          preDNAT,
 		OriginalSelector: origSelector,
+		PerformanceHints: perfHints,
 	}
 
 	// Figure out which IP sets are new.
@@ -297,6 +301,8 @@ type ParsedRules struct {
 	PreDNAT bool
 
 	OriginalSelector string
+
+	PerformanceHints []apiv3.PolicyPerformanceHint
 }
 
 // ParsedRule is like a backend.model.Rule, except the selector matches and named ports are
@@ -371,12 +377,12 @@ func ruleToParsedRule(rule *model.Rule) (parsedRule *ParsedRule, allIPSets []*IP
 
 	// Named ports on our endpoints have a protocol attached but our rules have the protocol at
 	// the top level.  Convert that to a protocol that we can use with the IP set calculation logic.
-	namedPortProto := labelindex.ProtocolTCP
+	namedPortProto := ipsetmember.ProtocolTCP
 	if rule.Protocol != nil {
-		if labelindex.ProtocolUDP.MatchesModelProtocol(*rule.Protocol) {
-			namedPortProto = labelindex.ProtocolUDP
-		} else if labelindex.ProtocolSCTP.MatchesModelProtocol(*rule.Protocol) {
-			namedPortProto = labelindex.ProtocolSCTP
+		if ipsetmember.ProtocolUDP.MatchesModelProtocol(*rule.Protocol) {
+			namedPortProto = ipsetmember.ProtocolUDP
+		} else if ipsetmember.ProtocolSCTP.MatchesModelProtocol(*rule.Protocol) {
+			namedPortProto = ipsetmember.ProtocolSCTP
 		}
 	}
 
@@ -500,7 +506,7 @@ func ruleToParsedRule(rule *model.Rule) (parsedRule *ParsedRule, allIPSets []*IP
 }
 
 // Converts a list of named ports to a list of IPSets.
-func namedPortsToIPSets(namedPorts []string, positiveSelectors []*selector.Selector, proto labelindex.IPSetPortProtocol) []*IPSetData {
+func namedPortsToIPSets(namedPorts []string, positiveSelectors []*selector.Selector, proto ipsetmember.Protocol) []*IPSetData {
 	var ipSets []*IPSetData
 	if len(positiveSelectors) > 1 {
 		log.WithField("selectors", positiveSelectors).Panic(

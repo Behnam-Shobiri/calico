@@ -39,7 +39,7 @@ VALIDARCHES = $(filter-out $(EXCLUDEARCH),$(ARCHES))
 # Note: OS is always set on Windows
 ifeq ($(OS),Windows_NT)
 BUILDARCH = x86_64
-BUILDOS = x86_64
+BUILDOS = Windows
 else
 BUILDARCH ?= $(shell uname -m)
 BUILDOS ?= $(shell uname -s | tr A-Z a-z)
@@ -300,9 +300,8 @@ DOCKER_BUILD=docker buildx build --load --platform=linux/$(ARCH) $(DOCKER_PULL)\
 	--build-arg CALICO_BASE=$(CALICO_BASE) \
 	--build-arg BPFTOOL_IMAGE=$(BPFTOOL_IMAGE)
 
-DOCKER_RUN := mkdir -p $(REPO_ROOT)/.go-pkg-cache bin $(GOMOD_CACHE) && \
+DOCKER_RUN_PRIV_NET := mkdir -p $(REPO_ROOT)/.go-pkg-cache bin $(GOMOD_CACHE) && \
 	docker run --rm \
-		--net=host \
 		--init \
 		$(EXTRA_DOCKER_ARGS) \
 		-e LOCAL_USER_ID=$(LOCAL_USER_ID) \
@@ -311,11 +310,13 @@ DOCKER_RUN := mkdir -p $(REPO_ROOT)/.go-pkg-cache bin $(GOMOD_CACHE) && \
 		-e GOPATH=/go \
 		-e OS=$(BUILDOS) \
 		-e GOOS=$(BUILDOS) \
-		-e GOFLAGS=$(GOFLAGS) \
+		-e "GOFLAGS=$(GOFLAGS)" \
 		-e ACK_GINKGO_DEPRECATIONS=1.16.5 \
 		-v $(REPO_ROOT):/go/src/github.com/projectcalico/calico:rw \
 		-v $(REPO_ROOT)/.go-pkg-cache:/go-cache:rw \
 		-w /go/src/$(PACKAGE_NAME)
+
+DOCKER_RUN := $(DOCKER_RUN_PRIV_NET) --net=host
 
 DOCKER_GO_BUILD := $(DOCKER_RUN) $(CALICO_BUILD)
 
@@ -500,10 +501,9 @@ git-commit:
 ###############################################################################
 
 ifdef LOCAL_CRANE
-CRANE_CMD         = bash -c $(double_quote)crane
+CRANE_CMD         = crane
 else
-CRANE_CMD         = docker run -t --entrypoint /bin/sh -v $(DOCKER_CONFIG):/root/.docker/config.json $(CALICO_BUILD) -c \
-                    $(double_quote)crane
+CRANE_CMD         = $(REPO_ROOT)/bin/crane
 endif
 
 ifdef LOCAL_PYTHON
@@ -524,10 +524,10 @@ GIT           = $(GIT_CMD)
 DOCKER        = $(DOCKER_CMD)
 RELEASE_PY3   = $(PYTHON3_CMD)
 else
-CRANE         = @echo [DRY RUN] $(CRANE_CMD)
-GIT           = @echo [DRY RUN] $(GIT_CMD)
-DOCKER        = @echo [DRY RUN] $(DOCKER_CMD)
-RELEASE_PY3   = @echo [DRY RUN] $(PYTHON3_CMD)
+CRANE         = echo [DRY RUN] $(CRANE_CMD)
+GIT           = echo [DRY RUN] $(GIT_CMD)
+DOCKER        = echo [DRY RUN] $(DOCKER_CMD)
+RELEASE_PY3   = echo [DRY RUN] $(PYTHON3_CMD)
 endif
 
 QUAY_SET_EXPIRY_SCRIPT = $(REPO_ROOT)/hack/set_quay_expiry.py
@@ -669,8 +669,12 @@ REPO_DIR=$(shell if [ -e hack/format-changed-files.sh ]; then echo '.'; else ech
 .PHONY: fix-changed go-fmt-changed goimports-changed
 # Format changed files only.
 fix-changed go-fmt-changed goimports-changed:
-	$(DOCKER_RUN) -e release_prefix=$(RELEASE_BRANCH_PREFIX)-v \
-	              -e git_repo_slug=$(GIT_REPO_SLUG) $(CALICO_BUILD) $(REPO_DIR)/hack/format-changed-files.sh
+	if [ "$(SKIP_FIX_CHANGED)" != "true" ]; then \
+	  $(DOCKER_RUN) -e release_prefix=$(RELEASE_BRANCH_PREFIX)-v \
+	                -e git_repo_slug=$(GIT_REPO_SLUG) \
+	                -e parent_branch=$(shell $(REPO_DIR)/hack/find-parent-release-branch.sh) \
+	                $(CALICO_BUILD) $(REPO_DIR)/hack/format-changed-files.sh; \
+	fi
 
 .PHONY: fix-all go-fmt-all goimports-all
 fix-all go-fmt-all goimports-all:
@@ -1059,13 +1063,21 @@ var-require: $(addprefix var-set-,$(subst -, ,$(REQUIRED_VARS)))
 # there isn't a non empty variable for each given value. For instance, to require FOO and BAR both must be set you would
 # call var-require-all-FOO-BAR.
 var-require-all-%:
-	$(MAKE) var-require REQUIRED_VARS=$* FAIL_NOT_SET=true
+	@$(MAKE) --quiet --no-print-directory var-require REQUIRED_VARS=$* FAIL_NOT_SET=true
 
 # var-require-one-of-% checks if the there are non empty variables set for the hyphen separated values in %, and fails
 # there isn't a non empty variable for at least one of the given values. For instance, to require either FOO or BAR both
 # must be set you would call var-require-all-FOO-BAR.
 var-require-one-of-%:
-	$(MAKE) var-require REQUIRED_VARS=$*
+	@$(MAKE) --quiet --no-print-directory var-require REQUIRED_VARS=$*
+
+# build-images echos the images that would be built.
+# If WINDOWS_IMAGE is set then it echos the windows image that would be built as well.
+build-images: var-require-all-BUILD_IMAGES
+	$(if $(WINDOWS_IMAGE),\
+		@echo $(BUILD_IMAGES) $(WINDOWS_IMAGE),\
+		@echo $(BUILD_IMAGES)\
+	)
 
 # sem-cut-release triggers the cut-release pipeline (or test-cut-release if CONFIRM is not specified) in semaphore to
 # cut the release. The pipeline is triggered for the current commit, and the branch it's triggered on is calculated
@@ -1207,9 +1219,9 @@ release-retag-dev-images-in-registry-%:
 # release-retag-dev-image-in-registry-% retags the build image specified by $* in the dev registry specified by
 # DEV_REGISTRY with the release tag specified by RELEASE_TAG. If DEV_REGISTRY is in the list of registries specified by
 # RELEASE_REGISTRIES then the retag is not done
-release-retag-dev-image-in-registry-%:
+release-retag-dev-image-in-registry-%: bin/crane
 	$(if $(filter-out $(RELEASE_REGISTRIES),$(DEV_REGISTRY)),\
-		$(CRANE) cp $(DEV_REGISTRY)/$(call unescapefs,$*):$(DEV_TAG) $(DEV_REGISTRY)/$(call unescapefs,$*):$(RELEASE_TAG))$(double_quote)
+		$(CRANE) cp $(DEV_REGISTRY)/$(call unescapefs,$*):$(DEV_TAG) $(DEV_REGISTRY)/$(call unescapefs,$*):$(RELEASE_TAG))
 
 # release-dev-images-to-registry-% copies and retags all the build / arch images specified by BUILD_IMAGES and
 # VALIDARCHES from the registry specified by DEV_REGISTRY to the registry specified by RELEASE_REGISTRY using the tag
@@ -1219,16 +1231,16 @@ release-dev-images-to-registry-%:
 
 # release-dev-image-to-registry-% copies the build image and build arch images specified by $* and VALIDARCHES from
 # the dev repo specified by DEV_TAG and RELEASE.
-release-dev-image-to-registry-%:
+release-dev-image-to-registry-%: bin/crane
 	$(if $(SKIP_MANIFEST_RELEASE),,\
-		$(CRANE) cp $(DEV_REGISTRY)/$(call unescapefs,$*):$(DEV_TAG) $(RELEASE_REGISTRY)/$(call unescapefs,$*):$(RELEASE_TAG))$(double_quote)
+		$(CRANE) cp $(DEV_REGISTRY)/$(call unescapefs,$*):$(DEV_TAG) $(RELEASE_REGISTRY)/$(call unescapefs,$*):$(RELEASE_TAG))
 	$(if $(SKIP_ARCH_RELEASE),,\
 		$(MAKE) $(addprefix release-dev-image-arch-to-registry-,$(VALIDARCHES)) BUILD_IMAGE=$(call unescapefs,$*))
 
 # release-dev-image-to-registry-% copies the build arch image specified by BUILD_IMAGE and ARCH from the dev repo
 # specified by DEV_TAG and RELEASE.
-release-dev-image-arch-to-registry-%:
-	$(CRANE) cp $(DEV_REGISTRY)/$(BUILD_IMAGE):$(DEV_TAG)-$* $(RELEASE_REGISTRY)/$(BUILD_IMAGE):$(RELEASE_TAG)-$*$(double_quote)
+release-dev-image-arch-to-registry-%: bin/crane
+	$(CRANE) cp $(DEV_REGISTRY)/$(BUILD_IMAGE):$(DEV_TAG)-$* $(RELEASE_REGISTRY)/$(BUILD_IMAGE):$(RELEASE_TAG)-$*
 
 # release-prereqs checks that the environment is configured properly to create a release.
 .PHONY: release-prereqs
@@ -1248,6 +1260,23 @@ bin/yq:
 	curl -sSf -L --retry 5 -o $(TMP)/yq4.tar.gz https://github.com/mikefarah/yq/releases/download/v4.34.2/yq_linux_$(BUILDARCH).tar.gz
 	tar -zxvf $(TMP)/yq4.tar.gz -C $(TMP)
 	mv $(TMP)/yq_linux_$(BUILDARCH) bin/yq
+
+# This setup is used to download and install the `crane` binary into $(REPOROOT)/bin/crane.
+# Normalize architecture for go-containerregistry filenames
+CRANE_ARCH = $(subst amd64,x86_64,$(BUILDARCH))
+ifeq ($(OS),Windows_NT)
+CRANE_OS = Windows
+else
+CRANE_OS = $(shell uname -s)
+endif
+CRANE_URL = https://github.com/google/go-containerregistry/releases/download/$(CRANE_VERSION)/go-containerregistry_$(CRANE_OS)_$(CRANE_ARCH).tar.gz
+
+.PHONY: bin/crane
+bin/crane: $(REPO_ROOT)/bin/crane
+$(REPO_ROOT)/bin/crane:
+	$(info ::: Downloading crane from $(CRANE_URL))
+	@mkdir -p $(REPO_ROOT)/bin
+	@curl -sSfL --retry 5 $(CRANE_URL) | tar xz -C $(REPO_ROOT)/bin crane
 
 ###############################################################################
 # Common functions for launching a local Kubernetes control plane.
@@ -1458,32 +1487,6 @@ help:
 # Common functions for building windows images.
 ###############################################################################
 
-# When running on semaphore, just copy the docker config, otherwise run
-# 'docker-credential-gcr configure-docker' as well.
-ifdef SEMAPHORE
-DOCKER_CREDENTIAL_CMD = cp /root/.docker/config.json_host /root/.docker/config.json
-else
-DOCKER_CREDENTIAL_CMD = cp /root/.docker/config.json_host /root/.docker/config.json && \
-						docker-credential-gcr configure-docker
-endif
-
-# This needs the $(WINDOWS_DIST)/bin/docker-credential-gcr binary in $PATH and
-# also the local ~/.config/gcloud dir to be able to push to gcr.io.  It mounts
-# $(DOCKER_CONFIG) and copies it so that it can be written to on the container,
-# but not have any effect on the host config.
-CRANE_BINDMOUNT_CMD := \
-	docker run --rm \
-		--net=host \
-		--init \
-		--entrypoint /bin/sh \
-		-e LOCAL_USER_ID=$(LOCAL_USER_ID) \
-		-v $(CURDIR):/go/src/$(PACKAGE_NAME):rw \
-		-v $(DOCKER_CONFIG):/root/.docker/config.json_host:ro \
-		-e PATH=$${PATH}:/go/src/$(PACKAGE_NAME)/$(WINDOWS_DIST)/bin \
-		-v $(HOME)/.config/gcloud:/root/.config/gcloud \
-		-w /go/src/$(PACKAGE_NAME) \
-		$(CALICO_BUILD) -c $(double_quote)$(DOCKER_CREDENTIAL_CMD) && crane
-
 DOCKER_MANIFEST_CMD := docker manifest
 
 ifdef CONFIRM
@@ -1591,7 +1594,7 @@ image-windows: setup-windows-builder var-require-all-WINDOWS_VERSIONS
 		$(MAKE) windows-sub-image-$${version}; \
 	done;
 
-release-windows-with-tag: var-require-one-of-CONFIRM-DRYRUN var-require-all-IMAGETAG-DEV_REGISTRIES image-windows docker-credential-gcr-binary
+release-windows-with-tag: var-require-one-of-CONFIRM-DRYRUN var-require-all-IMAGETAG-DEV_REGISTRIES image-windows docker-credential-gcr-binary bin/crane
 	for registry in $(DEV_REGISTRIES); do \
 		echo Pushing Windows images to $${registry}; \
 		all_images=""; \
@@ -1600,7 +1603,7 @@ release-windows-with-tag: var-require-one-of-CONFIRM-DRYRUN var-require-all-IMAG
 			image_tar="$(WINDOWS_DIST)/$(WINDOWS_IMAGE)-$(GIT_VERSION)-$${win_ver}.tar"; \
 			image="$${registry}/$(WINDOWS_IMAGE):$(IMAGETAG)-windows-$${win_ver}"; \
 			echo Pushing image $${image} ...; \
-			$(CRANE_BINDMOUNT) push $${image_tar} $${image}$(double_quote) & \
+			$(CRANE) push $${image_tar} $${image} & \
 			all_images="$${all_images} $${image}"; \
 		done; \
 		wait; \
@@ -1614,10 +1617,10 @@ release-windows-with-tag: var-require-one-of-CONFIRM-DRYRUN var-require-all-IMAG
 		$(RELEASE_PY3) $(QUAY_SET_EXPIRY_SCRIPT) add --expiry-days=$(QUAY_EXPIRE_DAYS) $${manifest_image} $${all_images} || true; \
 	done;
 
-release-windows: var-require-one-of-CONFIRM-DRYRUN var-require-all-DEV_REGISTRIES-WINDOWS_IMAGE var-require-one-of-VERSION-BRANCH_NAME
+release-windows: var-require-one-of-CONFIRM-DRYRUN var-require-all-DEV_REGISTRIES-WINDOWS_IMAGE var-require-one-of-VERSION-BRANCH_NAME bin/crane
 	describe_tag=$(if $(IMAGETAG_PREFIX),$(IMAGETAG_PREFIX)-)$(shell git describe --tags --dirty --long --always --abbrev=12); \
 	release_tag=$(if $(VERSION),$(VERSION),$(if $(IMAGETAG_PREFIX),$(IMAGETAG_PREFIX)-)$(BRANCH_NAME)); \
 	$(MAKE) release-windows-with-tag IMAGETAG=$${describe_tag}; \
 	for registry in $(DEV_REGISTRIES); do \
-		$(CRANE_BINDMOUNT) cp $${registry}/$(WINDOWS_IMAGE):$${describe_tag} $${registry}/$(WINDOWS_IMAGE):$${release_tag}$(double_quote); \
+		$(CRANE) cp $${registry}/$(WINDOWS_IMAGE):$${describe_tag} $${registry}/$(WINDOWS_IMAGE):$${release_tag}; \
 	done;

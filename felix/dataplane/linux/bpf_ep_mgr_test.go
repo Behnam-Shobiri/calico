@@ -30,6 +30,7 @@ import (
 	. "github.com/onsi/gomega"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	googleproto "google.golang.org/protobuf/proto"
 
 	"github.com/projectcalico/calico/felix/bpf"
@@ -41,10 +42,10 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/ifstate"
 	bpfipsets "github.com/projectcalico/calico/felix/bpf/ipsets"
 	"github.com/projectcalico/calico/felix/bpf/jump"
-	"github.com/projectcalico/calico/felix/bpf/maps"
 	bpfmaps "github.com/projectcalico/calico/felix/bpf/maps"
 	"github.com/projectcalico/calico/felix/bpf/mock"
 	"github.com/projectcalico/calico/felix/bpf/polprog"
+	"github.com/projectcalico/calico/felix/bpf/qos"
 	"github.com/projectcalico/calico/felix/bpf/state"
 	"github.com/projectcalico/calico/felix/bpf/tc"
 	"github.com/projectcalico/calico/felix/bpf/xdp"
@@ -77,6 +78,9 @@ type mockDataplane struct {
 	ensureStartedFn    func()
 	ensureQdiscFn      func(string) (bool, error)
 	interfaceByIndexFn func(ifindex int) (*net.Interface, error)
+
+	jitHarden             bool
+	finalTrampolineStride int
 }
 
 func newMockDataplane() *mockDataplane {
@@ -321,10 +325,23 @@ type mockProgMapDP struct {
 func (m *mockProgMapDP) loadPolicyProgram(progName string,
 	ipFamily proto.IPVersion,
 	rules polprog.Rules,
-	staticProgsMap maps.Map,
-	polProgsMap maps.Map,
+	staticProgsMap bpfmaps.Map,
+	polProgsMap bpfmaps.Map,
 	opts ...polprog.Option,
 ) ([]fileDescriptor, []asm.Insns, error) {
+	if m.jitHarden {
+		builder := new(polprog.Builder)
+		for _, o := range opts {
+			o(builder)
+		}
+
+		if builder.TrampolineStride() > 15000 {
+			return nil, nil, unix.ERANGE
+		}
+
+		m.finalTrampolineStride = builder.TrampolineStride()
+	}
+
 	fdCounterLock.Lock()
 	defer fdCounterLock.Unlock()
 	fdCounter++
@@ -350,7 +367,6 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		bpfEpMgr             *bpfEndpointManager
 		dp                   *mockDataplane
 		mockDP               bpfDataplane
-		fibLookupEnabled     bool
 		endpointToHostAction string
 		dataIfacePattern     string
 		l3IfacePattern       string
@@ -372,10 +388,10 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		countersMap          *mock.Map
 		jumpMap              *mock.Map
 		xdpJumpMap           *mock.Map
+		qosMap               *mock.Map
 	)
 
 	BeforeEach(func() {
-		fibLookupEnabled = true
 		endpointToHostAction = "DROP"
 		dataIfacePattern = "^eth0"
 		workloadIfaceRegex = "cali"
@@ -384,8 +400,6 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		ipSetIDAllocatorV6 = idalloc.New()
 		vxlanMTU = 0
 		nodePortDSR = true
-
-		bpfmaps.EnableRepin()
 
 		maps = new(bpfmap.Maps)
 
@@ -402,6 +416,8 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		commonMaps.StateMap = state.Map()
 		ifStateMap = mock.NewMockMap(ifstate.MapParams)
 		commonMaps.IfStateMap = ifStateMap
+		qosMap = mock.NewMockMap(qos.MapParams)
+		commonMaps.QoSMap = qosMap
 		cparams := counters.MapParameters
 		cparams.ValueSize *= bpfmaps.NumPossibleCPUs()
 		countersMap = mock.NewMockMap(cparams)
@@ -450,10 +466,6 @@ var _ = Describe("BPF Endpoint Manager", func() {
 		filterTableV6 = newMockTable("filter")
 	})
 
-	AfterEach(func() {
-		bpfmaps.DisableRepin()
-	})
-
 	newBpfEpMgr := func(ipv6Enabled bool) {
 		var err error
 		bpfEpMgr, err = NewBPFEndpointManager(
@@ -475,7 +487,6 @@ var _ = Describe("BPF Endpoint Manager", func() {
 				BPFIpv6Enabled:          ipv6Enabled,
 			},
 			maps,
-			fibLookupEnabled,
 			regexp.MustCompile(workloadIfaceRegex),
 			ipSetIDAllocatorV4,
 			ipSetIDAllocatorV6,
@@ -1039,6 +1050,24 @@ var _ = Describe("BPF Endpoint Manager", func() {
 			genHostMetadataV6Update("1::4")()
 			Expect(dp.numOfAttaches("cali12345:ingress")).To(Equal(5))
 			Expect(dp.numOfAttaches("cali12345:egress")).To(Equal(5))
+		})
+	})
+
+	Context("with jit-harden", func() {
+		JustBeforeEach(func() {
+			dp.jitHarden = true
+			mockDP = &mockProgMapDP{
+				dp,
+			}
+			newBpfEpMgr(false)
+			genWLUpdate("cali12345")()
+			genIfaceUpdate("cali12345", ifacemonitor.StateUp, 15)()
+		})
+
+		It("should load program with shorter trampoline jumps", func() {
+			Expect(dp.programAttached("cali12345:ingress")).To(BeTrue())
+			Expect(dp.programAttached("cali12345:egress")).To(BeTrue())
+			Expect(dp.finalTrampolineStride).To(BeNumerically("<=", 15000))
 		})
 	})
 

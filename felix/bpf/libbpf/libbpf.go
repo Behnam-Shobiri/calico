@@ -34,7 +34,12 @@ import (
 import "C"
 
 type Obj struct {
-	obj *C.struct_bpf_object
+	filename string
+	obj      *C.struct_bpf_object
+}
+
+func (o *Obj) Filename() string {
+	return o.filename
 }
 
 type Map struct {
@@ -109,7 +114,33 @@ func OpenObject(filename string) (*Obj, error) {
 	if obj == nil || err != nil {
 		return nil, fmt.Errorf("error opening libbpf object %w", err)
 	}
-	return &Obj{obj: obj}, nil
+
+	return &Obj{
+		filename: filename,
+		obj:      obj,
+	}, nil
+}
+
+func OpenObjectWithLogBuffer(filename string, buf []byte) (*Obj, error) {
+	if len(buf) == 0 {
+		return OpenObject(filename)
+	}
+
+	utils.IncreaseLockedMemoryQuota()
+	cFilename := C.CString(filename)
+
+	cBuf := (*C.char)(unsafe.Pointer(&buf[0]))
+
+	defer C.free(unsafe.Pointer(cFilename))
+	obj, err := C.bpf_obj_open_log_buf(cFilename, cBuf, C.size_t(len(buf)))
+	if obj == nil || err != nil {
+		return nil, fmt.Errorf("error opening libbpf object %w", err)
+	}
+
+	return &Obj{
+		filename: filename,
+		obj:      obj,
+	}, nil
 }
 
 func (o *Obj) Load() error {
@@ -165,6 +196,37 @@ func DetachClassifier(ifindex, handle, pref int, ingress bool) error {
 	_, err := C.bpf_tc_program_detach(C.int(ifindex), C.int(handle), C.int(pref), C.bool(ingress))
 
 	return err
+}
+
+func (o *Obj) SetAttachType(progName string, attachType uint32) error {
+	cProgName := C.CString(progName)
+	defer C.free(unsafe.Pointer(cProgName))
+	_, err := C.bpf_set_attach_type(o.obj, cProgName, C.uint(attachType))
+	return err
+}
+
+func ProgQueryTcx(ifindex int, ingress bool) ([64]uint32, [64]uint32, uint32, error) {
+	attachType := C.BPF_TCX_EGRESS
+	if ingress {
+		attachType = C.BPF_TCX_INGRESS
+	}
+	return progQuery(ifindex, attachType)
+}
+
+func progQuery(ifindex, attachType int) ([64]uint32, [64]uint32, uint32, error) {
+	var progIds, attachFlags [64]uint32
+	progCnt := uint32(64)
+	_, err := C.bpf_program_query(C.int(ifindex), C.int(attachType), 0,
+		(*C.uint)(unsafe.Pointer(&attachFlags[0])),
+		(*C.uint)(unsafe.Pointer(&progIds[0])),
+		(*C.uint)(unsafe.Pointer(&progCnt)))
+	return progIds, attachFlags, progCnt, err
+}
+
+func ProgName(id uint32) (string, error) {
+	buf := make([]byte, C.BPF_OBJ_NAME_LEN)
+	_, err := C.bpf_get_prog_name(C.uint(id), (*C.char)(unsafe.Pointer(&buf[0])))
+	return string(buf), err
 }
 
 func DetachCTLBProgramsLegacy(ipv4Enabled bool, cgroup string) error {
@@ -225,6 +287,22 @@ func (o *Obj) AttachClassifier(secName, ifName string, ingress bool, prio int, h
 	}
 
 	return nil
+}
+
+func (o *Obj) AttachTCX(secName, ifName string) (*Link, error) {
+	cSecName := C.CString(secName)
+	cIfName := C.CString(ifName)
+	defer C.free(unsafe.Pointer(cSecName))
+	defer C.free(unsafe.Pointer(cIfName))
+	ifIndex, err := C.if_nametoindex(cIfName)
+	if err != nil {
+		return nil, fmt.Errorf("error get ifindex for %s:%w", ifName, err)
+	}
+	link, err := C.bpf_tcx_program_attach(o.obj, cSecName, C.int(ifIndex))
+	if err != nil {
+		return nil, fmt.Errorf("error attaching tcx program %w", err)
+	}
+	return &Link{link: link}, nil
 }
 
 func (o *Obj) AttachXDP(ifName, progName string, oldID int, mode uint) (int, error) {
@@ -362,7 +440,7 @@ func OpenLink(path string) (*Link, error) {
 	defer C.free(unsafe.Pointer(cPath))
 	link, err := C.bpf_link_open(cPath)
 	if err != nil {
-		return nil, fmt.Errorf("error opening link %w", err)
+		return nil, err
 	}
 	return &Link{link: link}, nil
 }
@@ -474,12 +552,19 @@ func (o *Obj) AttachCGroupLegacy(cgroup, progName string) error {
 
 const (
 	// Set when IPv6 is enabled to configure bpf dataplane accordingly
-	GlobalsRPFOptionEnabled uint32 = C.CALI_GLOBALS_RPF_OPTION_ENABLED
-	GlobalsRPFOptionStrict  uint32 = C.CALI_GLOBALS_RPF_OPTION_STRICT
-	GlobalsNoDSRCidrs       uint32 = C.CALI_GLOBALS_NO_DSR_CIDRS
-	GlobalsLoUDPOnly        uint32 = C.CALI_GLOBALS_LO_UDP_ONLY
-	GlobalsRedirectPeer     uint32 = C.CALI_GLOBALS_REDIRECT_PEER
-	GlobalsFlowLogsEnabled  uint32 = C.CALI_GLOBALS_FLOWLOGS_ENABLED
+	GlobalsRPFOptionEnabled            uint32 = C.CALI_GLOBALS_RPF_OPTION_ENABLED
+	GlobalsRPFOptionStrict             uint32 = C.CALI_GLOBALS_RPF_OPTION_STRICT
+	GlobalsNoDSRCidrs                  uint32 = C.CALI_GLOBALS_NO_DSR_CIDRS
+	GlobalsLoUDPOnly                   uint32 = C.CALI_GLOBALS_LO_UDP_ONLY
+	GlobalsRedirectPeer                uint32 = C.CALI_GLOBALS_REDIRECT_PEER
+	GlobalsFlowLogsEnabled             uint32 = C.CALI_GLOBALS_FLOWLOGS_ENABLED
+	GlobalsNATOutgoingExcludeHosts     uint32 = C.CALI_GLOBALS_NATOUTGOING_EXCLUDE_HOSTS
+	GlobalsSkipEgressRedirect          uint32 = C.CALI_GLOBALS_SKIP_EGRESS_REDIRECT
+	GlobalsIngressPacketRateConfigured uint32 = C.CALI_GLOBALS_INGRESS_PACKET_RATE_CONFIGURED
+	GlobalsEgressPacketRateConfigured  uint32 = C.CALI_GLOBALS_EGRESS_PACKET_RATE_CONFIGURED
+
+	AttachTypeTcxIngress uint32 = C.BPF_TCX_INGRESS
+	AttachTypeTcxEgress  uint32 = C.BPF_TCX_EGRESS
 )
 
 func (t *TcGlobalData) Set(m *Map) error {
@@ -521,6 +606,8 @@ func (t *TcGlobalData) Set(m *Map) error {
 		C.uint(t.LogFilterJmp),
 		&cJumps[0], // it is safe because we hold the reference here until we return.
 		&cJumpsV6[0],
+		C.short(t.DSCP),
+		C.uint(t.MaglevLUTSize),
 	)
 
 	return err
@@ -576,7 +663,7 @@ func (x *XDPGlobalData) Set(m *Map) error {
 func NumPossibleCPUs() (int, error) {
 	ncpus := int(C.num_possible_cpu())
 	if ncpus < 0 {
-		return ncpus, fmt.Errorf("Invalid number of CPUs: %d", ncpus)
+		return ncpus, fmt.Errorf("invalid number of CPUs: %d", ncpus)
 	}
 	return ncpus, nil
 }
@@ -597,4 +684,66 @@ func ObjGet(path string) (int, error) {
 	fd, err := C.bpf_obj_get(cPath)
 
 	return int(fd), err
+}
+
+// MapUpdateBatch expects all keys, values in a single slice, bytes of a one
+// key/value appended back to back to the previous value.
+func MapUpdateBatch(fd int, k, v []byte, count int, flags uint64) (int, error) {
+	cK := C.CBytes(k)
+	defer C.free(cK)
+	cV := C.CBytes(v)
+	defer C.free(cV)
+
+	_, err := C.bpf_map_batch_update(C.int(fd), cK, cV, (*C.__u32)(unsafe.Pointer(&count)), C.__u64(flags))
+
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
+}
+
+var bpfMapTypeMap = map[string]int{
+	"unspec":           0,
+	"hash":             1,
+	"array":            2,
+	"prog_array":       3,
+	"perf_event_array": 4,
+	"percpu_hash":      5,
+	"percpu_array":     6,
+	"lru_hash":         9,
+	"lpm_trie":         11,
+}
+
+func CreateBPFMap(mapType string, keySize int, valueSize int, maxEntries int, flags int, name string) (int, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+
+	fd := C.create_bpf_map(
+		C.enum_bpf_map_type(bpfMapTypeMap[mapType]),
+		C.uint(keySize),
+		C.uint(valueSize),
+		C.uint(maxEntries),
+		C.uint(flags),
+		cname,
+	)
+	if fd < 0 {
+		return int(fd), fmt.Errorf("failed to create bpf map")
+	}
+	return int(fd), nil
+}
+
+// MapDeleteBatch expects all key is in a single slice, bytes of a one
+// key appended back to back to the previous value.
+func MapDeleteBatch(fd int, k []byte, count int, flags uint64) (int, error) {
+	cK := C.CBytes(k)
+	defer C.free(cK)
+
+	_, err := C.bpf_map_batch_delete(C.int(fd), cK, (*C.__u32)(unsafe.Pointer(&count)), C.__u64(flags))
+
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
 }

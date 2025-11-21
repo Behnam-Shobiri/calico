@@ -22,15 +22,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// ImageMap maps the image name to the repository.
-var ImageMap = map[string]string{
-	"typha":                     "calico/typha",
-	"calicoctl":                 "calico/ctl",
-	"flannel":                   "coreos/flannel",
-	"flexvol":                   "calico/pod2daemon-flexvol",
-	"key-cert-provisioner":      "calico/key-cert-provisioner",
-	"csi-node-driver-registrar": "calico/node-driver-registrar",
-}
+const TigeraOperatorImage = "tigera/operator"
 
 func CheckImage(image string) (bool, error) {
 	ref, err := name.ParseReference(image)

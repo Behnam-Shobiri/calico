@@ -370,6 +370,23 @@ configRetry:
 			if err != nil {
 				log.WithError(err).Panic("Bug: failed to override config parameter")
 			}
+		} else {
+			// BPF is enabled and supported. Now check for the BPFConntrackCleanupMode.
+			// With the conntrack map type changed to lru_hash, BPFConntrackModeBPFProgram isn't
+			// useful. Hence this option will be deprecated in the near future. If BPFConntrackCleanupMode
+			// is set to BPFConntrackModeBPFProgram, its reset to BPFConntrackModeUserspace.
+			log.Warn("BPF conntrack mode Auto,BPFProgram is not supported and will be deprecated soon. Falling back to userspace cleaner.")
+			_, err := configParams.OverrideParam("BPFConntrackCleanupMode", string(apiv3.BPFConntrackModeUserspace))
+			if err != nil {
+				log.WithError(err).Panic("Bug: failed to override config parameter BPFConntrackCleanupMode")
+			}
+			if configParams.BPFRedirectToPeer == "L2Only" {
+				log.Warn("BPFRedirectToPeer 'L2Only' is deprecated and equals 'Enabled' now.")
+				_, err := configParams.OverrideParam("BPFRedirectToPeer", "Enabled")
+				if err != nil {
+					log.WithError(err).Panic("Bug: failed to override config parameter BPFRedirectToPeer")
+				}
+			}
 		}
 	}
 
@@ -592,14 +609,9 @@ configRetry:
 		}
 		healthAggregator.Report(healthName, &health.HealthReport{Live: true, Ready: true})
 
-		supportsNodeResourceUpdates, err := typhaConnection.SupportsNodeResourceUpdates(10 * time.Second)
-		if err != nil {
-			time.Sleep(time.Second) // Avoid tight restart loop in case we didn't really wait 10s above.
-			log.WithError(err).Fatal("Did not get hello message from Typha in time")
-			return
-		}
-		log.Debugf("Typha supports node resource updates: %v", supportsNodeResourceUpdates)
-		configParams.SetUseNodeResourceUpdates(supportsNodeResourceUpdates)
+		// Typha client now requires support for node updates and will refuse
+		// to connect to an (ancient) Typha that does not support them.
+		configParams.SetUseNodeResourceUpdates(true)
 
 		go func() {
 			typhaConnection.Finished.Wait()
@@ -724,7 +736,7 @@ configRetry:
 	dpConnector.ToDataplane <- configParams.ToConfigUpdate()
 
 	if configParams.PrometheusMetricsEnabled {
-		log.Info("Prometheus metrics enabled.  Starting server.")
+		log.Info("Prometheus metrics enabled.")
 		gaugeHost := prometheus.NewGauge(prometheus.GaugeOpts{
 			Name:        "felix_host",
 			Help:        "Configured Felix hostname (as a label), typically used in grouping/aggregating stats; the label defaults to the hostname of the host but can be overridden by configuration. The value of the gauge is always set to 1.",
@@ -733,10 +745,30 @@ configRetry:
 		gaugeHost.Set(1)
 		prometheus.MustRegister(gaugeHost)
 		dp.ConfigurePrometheusMetrics(configParams)
-		go metricsserver.ServePrometheusMetricsForever(
-			configParams.PrometheusMetricsHost,
-			configParams.PrometheusMetricsPort,
-		)
+		if configParams.PrometheusMetricsKeyFile != "" || configParams.PrometheusMetricsCertFile != "" {
+			log.Info("Trying to start metrics https server.")
+			go func() {
+				err := metricsserver.ServePrometheusMetricsHTTPS(
+					prometheus.DefaultGatherer,
+					configParams.PrometheusMetricsHost,
+					configParams.PrometheusMetricsPort,
+					configParams.PrometheusMetricsCertFile,
+					configParams.PrometheusMetricsKeyFile,
+					configParams.PrometheusMetricsClientAuth,
+					configParams.PrometheusMetricsCAFile,
+				)
+				if err != nil {
+					log.Info("Error starting metrics https server.", err)
+				}
+			}()
+		} else {
+			log.Info("Starting metrics http server.")
+			go metricsserver.ServePrometheusMetricsHTTP(
+				prometheus.DefaultGatherer,
+				configParams.PrometheusMetricsHost,
+				configParams.PrometheusMetricsPort,
+			)
+		}
 	}
 
 	// Register signal handlers to dump memory/CPU profiles.
@@ -1235,13 +1267,14 @@ func (fc *DataplaneConnector) reconcileWireguardStatUpdate(dpPubKey string, ipVe
 		if ipVersion == proto.IPVersion_IPV6 {
 			storedPublicKey = node.Status.WireguardPublicKeyV6
 		} else if ipVersion != proto.IPVersion_IPV4 {
-			return fmt.Errorf("Unknown IP version: %d", ipVersion)
+			return fmt.Errorf("unknown IP version: %d", ipVersion)
 		}
 		if storedPublicKey != dpPubKey {
 			updateCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			if ipVersion == proto.IPVersion_IPV4 {
+			switch ipVersion {
+			case proto.IPVersion_IPV4:
 				node.Status.WireguardPublicKey = dpPubKey
-			} else if ipVersion == proto.IPVersion_IPV6 {
+			case proto.IPVersion_IPV6:
 				node.Status.WireguardPublicKeyV6 = dpPubKey
 			}
 			_, err := fc.datastorev3.Nodes().Update(updateCtx, node, options.SetOptions{})
