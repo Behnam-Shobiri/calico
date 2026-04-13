@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import (
 )
 
 // PolicyType enumerates the possible values of the PolicySpec Types field.
+// +kubebuilder:validation:Enum=Ingress;Egress
 type PolicyType string
 
 const (
@@ -33,11 +34,23 @@ const (
 // Each positive match criteria has a negated version, prefixed with "Not". All the match
 // criteria within a rule must be satisfied for a packet to match. A single rule can contain
 // the positive and negative version of a match and both must be satisfied for the rule to match.
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || !has(self.protocol) || self.protocol == 'TCP' || self.protocol == 6",message="rules with HTTP match must have protocol TCP or unset",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="self.action == 'Allow' || !has(self.http)",message="HTTP match is only valid on Allow rules",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.destination) || !has(self.destination.services) || (!has(self.destination.ports) || size(self.destination.ports) == 0) && (!has(self.destination.notPorts) || size(self.destination.notPorts) == 0)",message="ports and notPorts cannot be specified with services",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.icmp) || (has(self.protocol) && (self.protocol == 'ICMP' || self.protocol == 'ICMPv6' || self.protocol == 1 || self.protocol == 58))",message="ICMP fields require protocol to be ICMP or ICMPv6",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="(!has(self.protocol) || (self.protocol != 'ICMP' && self.protocol != 1)) || !has(self.ipVersion) || self.ipVersion == 4",message="protocol ICMP requires ipVersion 4",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="(!has(self.protocol) || (self.protocol != 'ICMPv6' && self.protocol != 58)) || !has(self.ipVersion) || self.ipVersion == 6",message="protocol ICMPv6 requires ipVersion 6",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="(!has(self.notProtocol) || (self.notProtocol != 'ICMP' && self.notProtocol != 1)) || !has(self.ipVersion) || self.ipVersion == 4",message="protocol ICMP requires ipVersion 4",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="(!has(self.notProtocol) || (self.notProtocol != 'ICMPv6' && self.notProtocol != 58)) || !has(self.ipVersion) || self.ipVersion == 6",message="protocol ICMPv6 requires ipVersion 6",reason=FieldValueInvalid
 type Rule struct {
-	Action Action `json:"action" validate:"action"`
+	Action Action `json:"action"`
+
 	// IPVersion is an optional field that restricts the rule to only match a specific IP
 	// version.
-	IPVersion *int `json:"ipVersion,omitempty" validate:"omitempty,ipVersion"`
+	// +kubebuilder:validation:Enum=4;6
+	// +optional
+	IPVersion *int `json:"ipVersion,omitempty"`
+
 	// Protocol is an optional field that restricts the rule to only apply to traffic of
 	// a specific IP protocol. Required if any of the EntityRules contain Ports
 	// (because ports only apply to certain protocols).
@@ -45,18 +58,25 @@ type Rule struct {
 	// Must be one of these string values: "TCP", "UDP", "ICMP", "ICMPv6", "SCTP", "UDPLite"
 	// or an integer in the range 1-255.
 	Protocol *numorstring.Protocol `json:"protocol,omitempty" validate:"omitempty"`
+
 	// ICMP is an optional field that restricts the rule to apply to a specific type and
 	// code of ICMP traffic.  This should only be specified if the Protocol field is set to
 	// "ICMP" or "ICMPv6".
 	ICMP *ICMPFields `json:"icmp,omitempty" validate:"omitempty"`
+
 	// NotProtocol is the negated version of the Protocol field.
 	NotProtocol *numorstring.Protocol `json:"notProtocol,omitempty" validate:"omitempty"`
+
 	// NotICMP is the negated version of the ICMP field.
 	NotICMP *ICMPFields `json:"notICMP,omitempty" validate:"omitempty"`
+
 	// Source contains the match criteria that apply to source entity.
-	Source EntityRule `json:"source,omitzero,omitempty" validate:"omitempty"`
+	// +optional
+	Source EntityRule `json:"source,omitzero" validate:"omitempty"`
+
 	// Destination contains the match criteria that apply to destination entity.
-	Destination EntityRule `json:"destination,omitzero,omitempty" validate:"omitempty"`
+	// +optional
+	Destination EntityRule `json:"destination,omitzero" validate:"omitempty"`
 
 	// HTTP contains match criteria that apply to HTTP requests.
 	HTTP *HTTPMatch `json:"http,omitempty" validate:"omitempty"`
@@ -69,7 +89,9 @@ type Rule struct {
 // exact: <path>: which matches the path exactly or
 // prefix: <path-prefix>: which matches the path prefix
 type HTTPPath struct {
-	Exact  string `json:"exact,omitempty" validate:"omitempty"`
+	// +kubebuilder:validation:MaxLength=1024
+	Exact string `json:"exact,omitempty" validate:"omitempty"`
+	// +kubebuilder:validation:MaxLength=1024
 	Prefix string `json:"prefix,omitempty" validate:"omitempty"`
 }
 
@@ -79,6 +101,8 @@ type HTTPMatch struct {
 	// Methods is an optional field that restricts the rule to apply only to HTTP requests that use one of the listed
 	// HTTP Methods (e.g. GET, PUT, etc.)
 	// Multiple methods are OR'd together.
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=atomic
 	Methods []string `json:"methods,omitempty" validate:"omitempty"`
 	// Paths is an optional field that restricts the rule to apply to HTTP requests that use one of the listed
 	// HTTP Paths.
@@ -87,17 +111,27 @@ type HTTPMatch struct {
 	// - exact: /foo
 	// - prefix: /bar
 	// NOTE: Each entry may ONLY specify either a `exact` or a `prefix` match. The validator will check for it.
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=atomic
 	Paths []HTTPPath `json:"paths,omitempty" validate:"omitempty"`
 }
 
 // ICMPFields defines structure for ICMP and NotICMP sub-struct for ICMP code and type
+// +kubebuilder:validation:XValidation:rule="!has(self.code) || has(self.type)",message="ICMP code specified without an ICMP type",reason=FieldValueInvalid
 type ICMPFields struct {
 	// Match on a specific ICMP type.  For example a value of 8 refers to ICMP Echo Request
 	// (i.e. pings).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=254
+	// +optional
 	Type *int `json:"type,omitempty" validate:"omitempty,gte=0,lte=254"`
+
 	// Match on a specific ICMP code.  If specified, the Type value must also be specified.
 	// This is a technical limitation imposed by the kernel's iptables firewall, which
 	// Calico uses to enforce the rule.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=255
+	// +optional
 	Code *int `json:"code,omitempty" validate:"omitempty,gte=0,lte=255"`
 }
 
@@ -106,9 +140,18 @@ type ICMPFields struct {
 //
 // A source EntityRule matches the source endpoint and originating traffic.
 // A destination EntityRule matches the destination endpoint and terminating traffic.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.selector) || !self.selector.contains('global(')",message="global() can only be used in an EntityRule namespaceSelector",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || !has(self.namespaceSelector) || size(self.namespaceSelector) == 0",message="cannot specify NamespaceSelector and Services on the same rule",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || !has(self.serviceAccounts)",message="cannot specify ServiceAccounts and Services on the same rule",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || size(self.services.name) > 0",message="services must specify a service name",reason=FieldValueRequired
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || (!has(self.selector) || size(self.selector) == 0) && (!has(self.notSelector) || size(self.notSelector) == 0)",message="cannot specify Selector/NotSelector and Services on the same rule",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.services) || (!has(self.nets) || size(self.nets) == 0) && (!has(self.notNets) || size(self.notNets) == 0)",message="cannot specify Nets/NotNets and Services on the same rule",reason=FieldValueForbidden
 type EntityRule struct {
 	// Nets is an optional field that restricts the rule to only apply to traffic that
 	// originates from (or terminates at) IP addresses in any of the given subnets.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
 	Nets []string `json:"nets,omitempty" validate:"omitempty,dive,net"`
 
 	// Selector is an optional field that contains a selector expression (see Policy for
@@ -127,6 +170,7 @@ type EntityRule struct {
 	//
 	// The effect is that the latter will accept packets from non-Calico sources whereas the
 	// former is limited to packets from Calico-controlled endpoints.
+	// +kubebuilder:validation:MaxLength=1024
 	Selector string `json:"selector,omitempty" validate:"omitempty,selector"`
 
 	// NamespaceSelector is an optional field that contains a selector expression. Only traffic
@@ -142,6 +186,7 @@ type EntityRule struct {
 	//
 	// For GlobalNetworkPolicy, an empty NamespaceSelector implies the Selector applies to workload
 	// endpoints across all namespaces.
+	// +kubebuilder:validation:MaxLength=1024
 	NamespaceSelector string `json:"namespaceSelector,omitempty" validate:"omitempty,selector"`
 
 	// Services is an optional field that contains options for matching Kubernetes Services.
@@ -159,19 +204,26 @@ type EntityRule struct {
 	// list of integers or strings that represent ranges of ports.
 	//
 	// Since only some protocols have ports, if any ports are specified it requires the
-	// Protocol match in the Rule to be set to "TCP" or "UDP".
+	// Protocol match in the Rule to be set to "TCP", "UDP", or "SCTP".
+	// +kubebuilder:validation:MaxItems=50
+	// +listType=atomic
 	Ports []numorstring.Port `json:"ports,omitempty" validate:"omitempty,dive"`
 
 	// NotNets is the negated version of the Nets field.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
 	NotNets []string `json:"notNets,omitempty" validate:"omitempty,dive,net"`
 
 	// NotSelector is the negated version of the Selector field.  See Selector field for
 	// subtleties with negated selectors.
+	// +kubebuilder:validation:MaxLength=1024
 	NotSelector string `json:"notSelector,omitempty" validate:"omitempty,selector"`
 
 	// NotPorts is the negated version of the Ports field.
 	// Since only some protocols have ports, if any ports are specified it requires the
-	// Protocol match in the Rule to be set to "TCP" or "UDP".
+	// Protocol match in the Rule to be set to "TCP", "UDP", or "SCTP".
+	// +kubebuilder:validation:MaxItems=50
+	// +listType=atomic
 	NotPorts []numorstring.Port `json:"notPorts,omitempty" validate:"omitempty,dive"`
 
 	// ServiceAccounts is an optional field that restricts the rule to only apply to traffic that originates from (or
@@ -181,16 +233,19 @@ type EntityRule struct {
 
 type ServiceMatch struct {
 	// Name specifies the name of a Kubernetes Service to match.
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name,omitempty" validate:"omitempty,name"`
 
 	// Namespace specifies the namespace of the given Service. If left empty, the rule
 	// will match within this policy's namespace.
+	// +kubebuilder:validation:MaxLength=253
 	Namespace string `json:"namespace,omitempty" validate:"omitempty,name"`
 }
 
 type ServiceAccountMatch struct {
 	// Names is an optional field that restricts the rule to only apply to traffic that originates from (or terminates
 	// at) a pod running as a service account whose name is in the list.
+	// +listType=set
 	Names []string `json:"names,omitempty" validate:"omitempty"`
 
 	// Selector is an optional field that restricts the rule to only apply to traffic that originates from
@@ -199,6 +254,7 @@ type ServiceAccountMatch struct {
 	Selector string `json:"selector,omitempty" validate:"omitempty,selector"`
 }
 
+// +kubebuilder:validation:Enum=Allow;Deny;Log;Pass
 type Action string
 
 const (
@@ -208,6 +264,7 @@ const (
 	Pass  Action = "Pass"
 )
 
+// +kubebuilder:validation:Enum=Set;Delete;Learn;Ignore
 type StagedAction string
 
 const (

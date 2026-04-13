@@ -387,6 +387,33 @@ subcomponents, see Felix's logs.
 
 ## <a id="process-logging">Process: Logging
 
+### `LogActionRateLimit` (config file) / `logActionRateLimit` (YAML)
+
+Sets the rate of hitting a Log action. The value must be in the format "N/unit",
+where N is a number and unit is one of: second, minute, hour, or day. For example: "10/second" or "100/hour".
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_LogActionRateLimit` |
+| Encoding (env var/config file) | String matching regex <code>^([1-9]\d{0,3}/(?:second\|minute\|hour\|day))?$</code> |
+| Default value (above encoding) | none |
+| `FelixConfiguration` field | `logActionRateLimit` (YAML) `LogActionRateLimit` (Go API) |
+| `FelixConfiguration` schema | String matching the regular expression <code>^[1-9]\d{0,3}/(?:second\|minute\|hour\|day)$</code>. |
+| Default value (YAML) | none |
+
+### `LogActionRateLimitBurst` (config file) / `logActionRateLimitBurst` (YAML)
+
+Sets the rate limit burst of hitting a Log action when LogActionRateLimit is enabled.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_LogActionRateLimitBurst` |
+| Encoding (env var/config file) | Integer: [0,2<sup>63</sup>-1], [9999,2<sup>63</sup>-1] |
+| Default value (above encoding) | `5` |
+| `FelixConfiguration` field | `logActionRateLimitBurst` (YAML) `LogActionRateLimitBurst` (Go API) |
+| `FelixConfiguration` schema | Integer: [0,2<sup>63</sup>-1], [9999,2<sup>63</sup>-1] |
+| Default value (YAML) | `5` |
+
 ### `LogDebugFilenameRegex` (config file) / `logDebugFilenameRegex` (YAML)
 
 Controls which source code files have their Debug log output included in the logs.
@@ -418,7 +445,14 @@ The full path to the Felix log. Set to none to disable file logging.
 
 ### `LogPrefix` (config file) / `logPrefix` (YAML)
 
-The log prefix that Felix uses when rendering LOG rules.
+The log prefix that Felix uses when rendering LOG rules. It is possible to use the following specifiers
+to include extra information in the log prefix.
+- %t: Tier name.
+- %k: Kind (short names).
+- %n: Policy or profile name.
+- %p: Policy or profile name (namespace/name for namespaced kinds or just name for non namespaced kinds).
+Calico includes ": " characters at the end of the generated log prefix.
+Note that iptables shows up to 29 characters for the log prefix and nftables up to 127 characters. Extra characters are truncated.
 
 | Detail |   |
 | --- | --- |
@@ -426,7 +460,7 @@ The log prefix that Felix uses when rendering LOG rules.
 | Encoding (env var/config file) | String |
 | Default value (above encoding) | `calico-packet` |
 | `FelixConfiguration` field | `logPrefix` (YAML) `LogPrefix` (Go API) |
-| `FelixConfiguration` schema | String. |
+| `FelixConfiguration` schema | String matching the regular expression <code>^([a-zA-Z0-9%: /_-])*$</code>. |
 | Default value (YAML) | `calico-packet` |
 
 ### `LogSeverityFile` (config file) / `logSeverityFile` (YAML)
@@ -870,6 +904,64 @@ must be disabled.
 | `FelixConfiguration` schema | One of: <code>"Disabled"</code>, <code>"Enabled"</code>. |
 | Default value (YAML) | `Enabled` |
 
+### `IPv4ElevatedRoutePriority` (config file) / `ipv4ElevatedRoutePriority` (YAML)
+
+Route Priority value for an elevated priority Calico-programmed IPv4 route. Note, higher
+values mean lower priority. Elevated priority is used during VM live migration, and for
+optimal behaviour IPv4ElevatedRoutePriority must be less than IPv4NormalRoutePriority.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IPv4ElevatedRoutePriority` |
+| Encoding (env var/config file) | Integer: [1,2147483646] |
+| Default value (above encoding) | `512` |
+| `FelixConfiguration` field | `ipv4ElevatedRoutePriority` (YAML) `IPv4ElevatedRoutePriority` (Go API) |
+| `FelixConfiguration` schema | Integer: [1,2147483646] |
+| Default value (YAML) | `512` |
+
+### `IPv4NormalRoutePriority` (config file) / `ipv4NormalRoutePriority` (YAML)
+
+Route Priority value for a normal priority Calico-programmed IPv4 route. Note, higher
+values mean lower priority.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IPv4NormalRoutePriority` |
+| Encoding (env var/config file) | Integer: [1,2147483646] |
+| Default value (above encoding) | `1024` |
+| `FelixConfiguration` field | `ipv4NormalRoutePriority` (YAML) `IPv4NormalRoutePriority` (Go API) |
+| `FelixConfiguration` schema | Integer: [1,2147483646] |
+| Default value (YAML) | `1024` |
+
+### `IPv6ElevatedRoutePriority` (config file) / `ipv6ElevatedRoutePriority` (YAML)
+
+Route Priority value for an elevated priority Calico-programmed IPv6 route. Note, higher
+values mean lower priority. Elevated priority is used during VM live migration, and for
+optimal behaviour IPv6ElevatedRoutePriority must be less than IPv6NormalRoutePriority.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IPv6ElevatedRoutePriority` |
+| Encoding (env var/config file) | Integer: [1,2147483646] |
+| Default value (above encoding) | `512` |
+| `FelixConfiguration` field | `ipv6ElevatedRoutePriority` (YAML) `IPv6ElevatedRoutePriority` (Go API) |
+| `FelixConfiguration` schema | Integer: [1,2147483646] |
+| Default value (YAML) | `512` |
+
+### `IPv6NormalRoutePriority` (config file) / `ipv6NormalRoutePriority` (YAML)
+
+Route Priority value for a normal priority Calico-programmed IPv6 route. Note, higher
+values mean lower priority.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IPv6NormalRoutePriority` |
+| Encoding (env var/config file) | Integer: [1,2147483646] |
+| Default value (above encoding) | `1024` |
+| `FelixConfiguration` field | `ipv6NormalRoutePriority` (YAML) `IPv6NormalRoutePriority` (Go API) |
+| `FelixConfiguration` schema | Integer: [1,2147483646] |
+| Default value (YAML) | `1024` |
+
 ### `InterfaceExclude` (config file) / `interfaceExclude` (YAML)
 
 A comma-separated list of interface names that should be excluded when Felix is resolving
@@ -931,6 +1023,49 @@ Controls whether Felix enables support for IPv6 (if supported by the in-use data
 | `FelixConfiguration` schema | Boolean. |
 | Default value (YAML) | `true` |
 
+### `IstioAmbientMode` (config file) / `istioAmbientMode` (YAML)
+
+Configures Felix to work together with Tigera's Istio distribution.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IstioAmbientMode` |
+| Encoding (env var/config file) | One of: <code>Disabled</code>, <code>Enabled</code> (case insensitive) |
+| Default value (above encoding) | `Disabled` |
+| `FelixConfiguration` field | `istioAmbientMode` (YAML) `IstioAmbientMode` (Go API) |
+| `FelixConfiguration` schema | One of: <code>"Disabled"</code>, <code>"Enabled"</code>. |
+| Default value (YAML) | `Disabled` |
+
+### `IstioDSCPMark` (config file) / `istioDSCPMark` (YAML)
+
+Sets the value to use when directing traffic to Istio ZTunnel, when Istio is enabled. The mark is set only on
+SYN packets at the final hop to avoid interference with other protocols. This value is reserved by Calico and must not be used
+with other Istio installation.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_IstioDSCPMark` |
+| Encoding (env var/config file) | Numeric value: An integer from 0 to 63, representing the 6-bit DSCP code directly; Named value: A case-insensitive string corresponding to a standardized DSCP name (e.g., "CS0", "AF11", "AF21", "EF", etc.) as defined in the IANA registry for Differentiated Services Field Codepoints. |
+| Default value (above encoding) | `23` |
+| `FelixConfiguration` field | `istioDSCPMark` (YAML) `IstioDSCPMark` (Go API) |
+| `FelixConfiguration` schema | String. |
+| Default value (YAML) | none |
+
+### `LiveMigrationRouteConvergenceTime` (config file) / `liveMigrationRouteConvergenceTime` (YAML)
+
+The time to keep elevated route priority after a
+VM live migration completes. This allows routes to converge across the cluster before
+reverting to normal priority.
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_LiveMigrationRouteConvergenceTime` |
+| Encoding (env var/config file) | Seconds (floating point) |
+| Default value (above encoding) | `30` (30s) |
+| `FelixConfiguration` field | `liveMigrationRouteConvergenceTime` (YAML) `LiveMigrationRouteConvergenceTime` (Go API) |
+| `FelixConfiguration` schema | Duration string, for example <code>1m30s123ms</code> or <code>1h5m</code>. |
+| Default value (YAML) | `30s` |
+
 ### `MTUIfacePattern` (config file) / `mtuIfacePattern` (YAML)
 
 A regular expression that controls which interfaces Felix should scan in order
@@ -988,7 +1123,7 @@ network stack is used.
 | Encoding (env var/config file) | Port range: either a single number in [0,65535] or a range of numbers <code>n:m</code> |
 | Default value (above encoding) | none |
 | `FelixConfiguration` field | `natPortRange` (YAML) `NATPortRange` (Go API) |
-| `FelixConfiguration` schema | String. |
+| `FelixConfiguration` schema | Port range: either an integer in [0,65535] or a string, representing a range, in format <code>n:m</code> |
 | Default value (YAML) | `0` |
 
 ### `NFTablesMode` (config file) / `nftablesMode` (YAML)
@@ -998,11 +1133,11 @@ Configures nftables support in Felix.
 | Detail |   |
 | --- | --- |
 | Environment variable | `FELIX_NFTablesMode` |
-| Encoding (env var/config file) | One of: <code>Disabled</code>, <code>Enabled</code> (case insensitive) |
-| Default value (above encoding) | `Disabled` |
+| Encoding (env var/config file) | One of: <code>Auto</code>, <code>Disabled</code>, <code>Enabled</code> (case insensitive) |
+| Default value (above encoding) | `Auto` |
 | `FelixConfiguration` field | `nftablesMode` (YAML) `NFTablesMode` (Go API) |
-| `FelixConfiguration` schema | One of: <code>"Disabled"</code>, <code>"Enabled"</code>. |
-| Default value (YAML) | `Disabled` |
+| `FelixConfiguration` schema | One of: <code>"Auto"</code>, <code>"Disabled"</code>, <code>"Enabled"</code>. |
+| Default value (YAML) | `Auto` |
 
 ### `NetlinkTimeoutSecs` (config file) / `netlinkTimeout` (YAML)
 
@@ -1034,8 +1169,10 @@ like Application layer policy.
 
 ### `ProgramClusterRoutes` (config file) / `programClusterRoutes` (YAML)
 
-Specifies whether Felix should program IPIP routes instead of BIRD.
-Felix always programs VXLAN routes.
+Controls how a cluster node gets a route to a workload on another node,
+when that workload's IP comes from an IP Pool with vxlanMode: Never. When ProgramClusterRoutes is Disabled,
+it is expected that confd and BIRD will program that route. When ProgramClusterRoutes is Enabled, Felix program that route.
+Felix always programs such routes for IP Pools with vxlanMode: Always or vxlanMode: CrossSubnet.
 
 | Detail |   |
 | --- | --- |
@@ -1236,8 +1373,8 @@ should be cleaned up to avoid confusing interactions.
 | Encoding (env var/config file) | One of: <code>auto</code>, <code>legacy</code>, <code>nft</code> (case insensitive) |
 | Default value (above encoding) | `auto` |
 | `FelixConfiguration` field | `iptablesBackend` (YAML) `IptablesBackend` (Go API) |
-| `FelixConfiguration` schema | One of: <code>Auto</code>, <code>Legacy</code>, <code>NFT</code>. |
-| Default value (YAML) | `Auto` |
+| `FelixConfiguration` schema | One of: <code>"Auto"</code>, <code>"Legacy"</code>, <code>"NFT"</code>. |
+| Default value (YAML) | `auto` |
 
 ### `IptablesFilterAllowAction` (config file) / `iptablesFilterAllowAction` (YAML)
 
@@ -1795,6 +1932,23 @@ determines the CTLB behavior.
 | Default value (YAML) | `Enabled` |
 | Notes | Required. | 
 
+### `BPFIPFragTimeout` (config file) / `bpfIPFragTimeout` (YAML)
+
+In BPF mode, controls the timeout for IP fragment reassembly.
+This is the maximum time that the BPF dataplane will wait for all fragments of a
+fragmented IP packet to arrive before discarding them. If left unset, the value
+is read from the Linux kernel sysctl net.ipv4.ipfrag_time (which defaults to 30
+seconds).
+
+| Detail |   |
+| --- | --- |
+| Environment variable | `FELIX_BPFIPFragTimeout` |
+| Encoding (env var/config file) | Seconds (floating point) |
+| Default value (above encoding) | `0` (0s) |
+| `FelixConfiguration` field | `bpfIPFragTimeout` (YAML) `BPFIPFragTimeout` (Go API) |
+| `FelixConfiguration` schema | Duration string, for example <code>1m30s123ms</code> or <code>1h5m</code>. |
+| Default value (YAML) | `0s` |
+
 ### `BPFJITHardening` (config file) / `bpfJITHardening` (YAML)
 
 Controls BPF JIT hardening. When set to "Auto", Felix will set JIT hardening to 1
@@ -1815,6 +1969,7 @@ Felix will not modify the JIT hardening setting.
 
 In BPF mode, controls the port that Felix's embedded kube-proxy health check server binds to.
 The health check server is used by external load balancers to determine if this node should receive traffic.
+Set to 0 to disable the health check server.
 
 | Detail |   |
 | --- | --- |
@@ -1824,7 +1979,6 @@ The health check server is used by external load balancers to determine if this 
 | `FelixConfiguration` field | `bpfKubeProxyHealthzPort` (YAML) `BPFKubeProxyHealthzPort` (Go API) |
 | `FelixConfiguration` schema | Integer |
 | Default value (YAML) | `10256` |
-| Notes | Required. | 
 
 ### `BPFKubeProxyIptablesCleanupEnabled` (config file) / `bpfKubeProxyIptablesCleanupEnabled` (YAML)
 
@@ -2108,7 +2262,7 @@ inclusive.
 | Encoding (env var/config file) | Port range: either a single number in [0,65535] or a range of numbers <code>n:m</code> |
 | Default value (above encoding) | `20000:29999` |
 | `FelixConfiguration` field | `bpfPSNATPorts` (YAML) `BPFPSNATPorts` (Go API) |
-| `FelixConfiguration` schema | String. |
+| `FelixConfiguration` schema | Port range: either an integer in [0,65535] or a string, representing a range, in format <code>n:m</code> |
 | Default value (YAML) | `20000:29999` |
 
 ### `BPFPolicyDebugEnabled` (config file) / `bpfPolicyDebugEnabled` (YAML)
@@ -2143,7 +2297,7 @@ Disabled or Enabled.
 ### `BPFRedirectToPeer` (config file) / `bpfRedirectToPeer` (YAML)
 
 Controls whether traffic may be forwarded directly to the peer side of a workload’s device.
-Note that the legacy "L2Only" option is now deprecated and if set it is treated like "Enabled.
+Note that the legacy "L2Only" option is now deprecated and if set it is treated like "Enabled".
 Setting this option to "Enabled" allows direct redirection (including from L3 host devices such as IPIP tunnels or WireGuard),
 which can improve redirection performance but causes the redirected packets to bypass the host‑side ingress path.
 As a result, packet‑capture tools on the host side of the workload device (for example, tcpdump) will not see that traffic.

@@ -15,8 +15,7 @@
 package nftables_test
 
 import (
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/projectcalico/calico/felix/generictables"
@@ -128,9 +127,18 @@ var _ = DescribeTable("MatchBuilder",
 	Entry("ICMPV6TypeAndCode", nftables.Match().ICMPV6TypeAndCode(123, 5), "icmpv6 type 123 code 5"),
 	Entry("NotICMPV6TypeAndCode", nftables.Match().NotICMPV6TypeAndCode(123, 5), "icmpv6 type != 123 code != 5"),
 
+	// Limits.
+	Entry("Limit with rate", nftables.Match().Limit("10/minute", 0), "limit rate 10/minute"),
+	Entry("Limit with rate and burst", nftables.Match().Limit("20/hour", 10), "limit rate 20/hour burst 10 packets"),
+
 	// VMAPs
 	Entry("InInterfaceVMAP", nftables.Match().InInterfaceVMAP("vmap1234").(nftables.NFTMatchCriteria).SetLayer("filter"), "iifname vmap @filter-vmap1234"),
 	Entry("OutInterfaceVMAP", nftables.Match().OutInterfaceVMAP("vmap1234").(nftables.NFTMatchCriteria).SetLayer("raw"), "oifname vmap @raw-vmap1234"),
+
+	// ARP family matches.
+	Entry("ARPOperation", nftables.Match().ARPOperation("reply"), "arp operation reply"),
+	Entry("ARPSrcIP", nftables.Match().ARPSrcIP("10.0.0.1"), "arp saddr ip 10.0.0.1"),
+	Entry("ARP combined", nftables.Match().OutInterface("cali1234").ARPOperation("reply").ARPSrcIP("10.0.0.1"), "oifname cali1234 arp operation reply arp saddr ip 10.0.0.1"),
 
 	// Check multiple match criteria are joined correctly.
 	Entry("Protocol and ports", nftables.Match().Protocol("tcp").SourcePorts(1234).DestPorts(8080), "meta l4proto tcp tcp sport { 1234 } tcp dport { 8080 }"),

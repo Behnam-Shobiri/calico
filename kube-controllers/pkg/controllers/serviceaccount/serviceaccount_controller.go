@@ -23,8 +23,9 @@ import (
 	log "github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	uruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
@@ -49,15 +50,15 @@ type serviceAccountController struct {
 }
 
 // NewServiceAccountController returns a controller which manages ServiceAccount objects.
-func NewServiceAccountController(ctx context.Context, k8sClientset *kubernetes.Clientset, c client.Interface, cfg config.GenericControllerConfig) controller.Controller {
+func NewServiceAccountController(ctx context.Context, k8sClientset kubernetes.Interface, c client.Interface, cfg config.GenericControllerConfig) controller.Controller {
 	serviceAccountConverter := converter.NewServiceAccountConverter()
 
 	// Function returns map of profile_name:object stored by policy controller
 	// in the Calico datastore. Identifies controller written objects by
 	// their naming convention.
-	listFunc := func() (map[string]interface{}, error) {
+	listFunc := func() (map[string]any, error) {
 		log.Debugf("Listing profiles from Calico datastore: to check for ServiceAccount")
-		filteredProfiles := make(map[string]interface{})
+		filteredProfiles := make(map[string]any)
 
 		// Get all profile objects from Calico datastore.
 		profileList, err := c.Profiles().List(ctx, options.ListOptions{})
@@ -83,13 +84,23 @@ func NewServiceAccountController(ctx context.Context, k8sClientset *kubernetes.C
 	// Create a Cache to store Profiles in.
 	cacheArgs := rcache.ResourceCacheArgs{
 		ListFunc:    listFunc,
-		ObjectType:  reflect.TypeOf(api.Profile{}),
+		ObjectType:  reflect.TypeFor[api.Profile](),
 		LogTypeDesc: "ServiceAccount",
 	}
 	ccache := rcache.NewResourceCache(cacheArgs)
 
-	// Create a ServiceAccount watcher.
-	listWatcher := cache.NewListWatchFromClient(k8sClientset.CoreV1().RESTClient(), "serviceaccounts", "", fields.Everything())
+	// Create a ServiceAccount watcher. Wrap with ToListWatcherWithWatchListSemantics
+	// so the reflector inherits the clientset's WatchList capability signal (fake
+	// clientsets report WatchList as unsupported).
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+			return k8sClientset.CoreV1().ServiceAccounts("").List(ctx, opts)
+		},
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+			return k8sClientset.CoreV1().ServiceAccounts("").Watch(ctx, opts)
+		},
+	}
+	listWatcher := cache.ToListWatcherWithWatchListSemantics(lw, k8sClientset)
 
 	// Bind the calico cache to kubernetes cache with the help of an informer. This way we make sure that
 	// whenever the kubernetes cache is updated, changes get reflected in the Calico cache as well.
@@ -98,7 +109,7 @@ func NewServiceAccountController(ctx context.Context, k8sClientset *kubernetes.C
 		ObjectType:    &v1.ServiceAccount{},
 		ResyncPeriod:  0,
 		Handler: cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				log.Debugf("Got ADD event for ServiceAccount: %#v", obj)
 				profile, err := serviceAccountConverter.Convert(obj)
 				if err != nil {
@@ -110,7 +121,7 @@ func NewServiceAccountController(ctx context.Context, k8sClientset *kubernetes.C
 				k := serviceAccountConverter.GetKey(profile)
 				ccache.Set(k, profile)
 			},
-			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+			UpdateFunc: func(oldObj any, newObj any) {
 				log.Debugf("Got UPDATE event for ServiceAccount")
 				log.Debugf("Old object: \n%#v\n", oldObj)
 				log.Debugf("New object: \n%#v\n", newObj)
@@ -126,7 +137,7 @@ func NewServiceAccountController(ctx context.Context, k8sClientset *kubernetes.C
 				k := serviceAccountConverter.GetKey(profile)
 				ccache.Set(k, profile)
 			},
-			DeleteFunc: func(obj interface{}) {
+			DeleteFunc: func(obj any) {
 				// Convert the ServiceAccount into a Profile.
 				log.Debugf("Got DELETE event for ServiceAccount: %#v", obj)
 				profile, err := serviceAccountConverter.Convert(obj)

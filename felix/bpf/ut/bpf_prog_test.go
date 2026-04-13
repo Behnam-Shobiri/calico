@@ -28,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
@@ -39,6 +40,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/projectcalico/calico/felix/bpf"
+	"github.com/projectcalico/calico/felix/bpf/allowsources"
 	"github.com/projectcalico/calico/felix/bpf/arp"
 	"github.com/projectcalico/calico/felix/bpf/conntrack"
 	"github.com/projectcalico/calico/felix/bpf/counters"
@@ -51,10 +53,10 @@ import (
 	"github.com/projectcalico/calico/felix/bpf/libbpf"
 	"github.com/projectcalico/calico/felix/bpf/maps"
 	"github.com/projectcalico/calico/felix/bpf/nat"
-	"github.com/projectcalico/calico/felix/bpf/perf"
 	"github.com/projectcalico/calico/felix/bpf/polprog"
 	"github.com/projectcalico/calico/felix/bpf/profiling"
 	"github.com/projectcalico/calico/felix/bpf/qos"
+	"github.com/projectcalico/calico/felix/bpf/ringbuf"
 	"github.com/projectcalico/calico/felix/bpf/routes"
 	"github.com/projectcalico/calico/felix/bpf/state"
 	tcdefs "github.com/projectcalico/calico/felix/bpf/tc/defs"
@@ -228,6 +230,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexNewFlow,
 		tcdefs.ProgIndexIPFrag,
 		tcdefs.ProgIndexMaglev,
+		tcdefs.ProgIndexTCPRst,
 	},
 	"IPv4 debug": []int{
 		tcdefs.ProgIndexMainDebug,
@@ -240,6 +243,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexNewFlowDebug,
 		tcdefs.ProgIndexIPFragDebug,
 		tcdefs.ProgIndexMaglevDebug,
+		tcdefs.ProgIndexTCPRstDebug,
 	},
 	"IPv6": []int{
 		tcdefs.ProgIndexMain,
@@ -251,6 +255,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexIcmpInnerNat,
 		tcdefs.ProgIndexNewFlow,
 		tcdefs.ProgIndexMaglev,
+		tcdefs.ProgIndexTCPRst,
 	},
 	"IPv6 debug": []int{
 		tcdefs.ProgIndexMainDebug,
@@ -262,6 +267,7 @@ var tcJumpMapIndexes = map[string][]int{
 		tcdefs.ProgIndexIcmpInnerNatDebug,
 		tcdefs.ProgIndexNewFlowDebug,
 		tcdefs.ProgIndexMaglevDebug,
+		tcdefs.ProgIndexTCPRstDebug,
 	},
 }
 
@@ -289,14 +295,19 @@ func TestLoadZeroProgram(t *testing.T) {
 }
 
 type testLogger interface {
-	Log(args ...interface{})
-	Logf(format string, args ...interface{})
+	Log(args ...any)
+	Logf(format string, args ...any)
 }
 
 func startBPFLogging() *exec.Cmd {
-	cmd := exec.Command("/usr/bin/bpftool", "prog", "tracelog")
+	cmd := exec.Command("bpftool", "prog", "tracelog")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Pdeathsig ensures the kernel sends SIGKILL to bpftool when the test
+	// binary exits for any reason (including panic/crash/signal).  Without
+	// this, bpftool inherits the pipe FDs and keeps them open, causing
+	// gotestsum to block forever when the test binary runs in a pipeline.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	err := cmd.Start()
 	if err != nil {
 		log.WithError(err).Warn("Failed to start bpf log collection")
@@ -314,20 +325,32 @@ func stopBPFLogging(cmd *exec.Cmd) {
 		log.WithError(err).Warn("Failed to send SIGTERM to bpftool")
 		return
 	}
-	err = cmd.Wait()
-	if err != nil {
-		log.WithError(err).Warn("Failed to wait for bpftool")
+	// Wait with a timeout; bpftool may be blocked in ring_buffer_wait
+	// and not respond to SIGTERM promptly.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+		if err != nil {
+			log.WithError(err).Warn("bpftool exited with error")
+		}
+	case <-time.After(3 * time.Second):
+		log.Warn("bpftool did not exit after SIGTERM, sending SIGKILL")
+		_ = cmd.Process.Kill()
+		<-done
 	}
 }
 
 func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rules,
 	runFn func(progName string), opts ...testOption) {
 	topts := testOpts{
-		subtests:  true,
-		logLevel:  log.DebugLevel,
-		psnaStart: 20000,
-		psnatEnd:  30000,
-		dscp:      -1,
+		subtests:      true,
+		logLevel:      log.DebugLevel,
+		psnaStart:     20000,
+		psnatEnd:      30000,
+		dscp:          -1,
+		istioDSCP:     -1,
+		ipfragTimeout: 30,
 	}
 
 	for _, o := range opts {
@@ -394,19 +417,21 @@ func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rul
 
 	if topts.objname != "" {
 		obj = topts.objname
-	} else {
-		obj += "_co-re"
-		if topts.ipv6 {
-			obj += "_v6"
-		}
+	} else if topts.ipv6 {
+		obj += "_v6"
 	}
 
+	useIngressProgMap := strings.Contains(obj, "from_")
 	if topts.xdp {
-		o, err := objLoad("../../bpf-gpl/bin/xdp_preamble.o", bpfFsDir, "preamble", topts, false, false, false)
+		o, err := objLoad("../../bpf-gpl/bin/xdp_preamble.o", bpfFsDir, "preamble", topts, false, false, false, false)
 		Expect(err).NotTo(HaveOccurred())
 		defer o.Close()
 	} else {
-		o, err := objLoad("../../bpf-gpl/bin/tc_preamble.o", bpfFsDir, "preamble", topts, false, false, false)
+		fileToLoad := "../../bpf-gpl/bin/tc_preamble_egress.o"
+		if useIngressProgMap {
+			fileToLoad = "../../bpf-gpl/bin/tc_preamble_ingress.o"
+		}
+		o, err := objLoad(fileToLoad, bpfFsDir, "preamble", topts, false, false, false, useIngressProgMap)
 		Expect(err).NotTo(HaveOccurred())
 		defer o.Close()
 	}
@@ -417,13 +442,17 @@ func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rul
 
 	hasMaglev := strings.Contains(obj, "from_hep")
 	obj += ".o"
-	o, err := objLoad(obj, bpfFsDir, ipFamily, topts, rules != nil, true, hasMaglev)
+	o, err := objLoad(obj, bpfFsDir, ipFamily, topts, rules != nil, true, hasMaglev, useIngressProgMap)
 	Expect(err).NotTo(HaveOccurred())
 	defer o.Close()
 
 	if rules != nil {
-		staticProgMap := progMap
-		polMap := policyJumpMap
+		staticProgMap := progMap[hook.Egress]
+		polMap := policyJumpMap[hook.Egress]
+		if useIngressProgMap {
+			staticProgMap = progMap[hook.Ingress]
+			polMap = policyJumpMap[hook.Ingress]
+		}
 		popts := []polprog.Option{}
 		stride := jump.TCMaxEntryPoints
 		if topts.xdp {
@@ -465,14 +494,16 @@ func setupAndRun(logger testLogger, loglevel, section string, rules *polprog.Rul
 			}
 			Expect(errs).To(BeEmpty())
 		}()
-		var progType uint32
+		progType := uint32(0)
+		attachType := uint32(0)
 		if topts.xdp {
 			progType = unix.BPF_PROG_TYPE_XDP
+			attachType = libbpf.AttachTypeXDP
 		} else {
 			progType = unix.BPF_PROG_TYPE_SCHED_CLS
 		}
 		for i, p := range insns {
-			polProgFD, err := bpf.LoadBPFProgramFromInsns(p, "calico_policy", "Apache-2.0", progType)
+			polProgFD, err := bpf.LoadBPFProgramFromInsnsWithAttachType(p, "calico_policy", "Apache-2.0", progType, attachType)
 			Expect(err).NotTo(HaveOccurred(), "failed to load program into the kernel")
 			Expect(polProgFD).NotTo(BeZero())
 			polProgFDs = append(polProgFDs, polProgFD)
@@ -586,14 +617,16 @@ func bpftool(args ...string) ([]byte, error) {
 var (
 	mapInitOnce sync.Once
 
-	natMap, natBEMap, ctMap, ctCleanupMap, rtMap, ipsMap, testStateMap, affinityMap, arpMap, fsafeMap, ipfragsMap, maglevMap maps.Map
-	natMapV6, natBEMapV6, ctMapV6, ctCleanupMapV6, rtMapV6, ipsMapV6, affinityMapV6, arpMapV6, fsafeMapV6, maglevMapV6       maps.Map
-	stateMap, countersMap, ifstateMap, progMap, progMapXDP, policyJumpMap, policyJumpMapXDP                                  maps.Map
-	perfMap                                                                                                                  maps.Map
-	profilingMap, ipfragsMapTmp                                                                                              maps.Map
-	qosMap                                                                                                                   maps.Map
-	ctlbProgsMap                                                                                                             []maps.Map
-	allMaps                                                                                                                  []maps.Map
+	natMap, natBEMap, ctMap, ctCleanupMap, rtMap, ipsMap, testStateMap, affinityMap, arpMap, fsafeMap, ipfragsMap, ipfragsFwdMap, maglevMap, allowSourcesMap maps.Map
+	natMapV6, natBEMapV6, ctMapV6, ctCleanupMapV6, rtMapV6, ipsMapV6, affinityMapV6, arpMapV6, fsafeMapV6, maglevMapV6, allowSourcesMapV6                    maps.Map
+	stateMap, countersMap, ifstateMap, progMapXDP, policyJumpMapXDP                                                                                          maps.Map
+	policyJumpMap                                                                                                                                            []maps.Map
+	ringBufMap, ringBufDropsMap                                                                                                                              maps.Map
+	profilingMap, ipfragsMapTmp                                                                                                                              maps.Map
+	qosMap                                                                                                                                                   maps.Map
+	ctlbProgsMap                                                                                                                                             []maps.Map
+	progMap                                                                                                                                                  []maps.Map
+	allMaps                                                                                                                                                  []maps.Map
 )
 
 func initMapsOnce() {
@@ -621,21 +654,27 @@ func initMapsOnce() {
 		countersMap = counters.Map()
 		ipfragsMap = ipfrags.Map()
 		ipfragsMapTmp = ipfrags.MapTmp()
+		ipfragsFwdMap = ipfrags.FwdMap()
 		ifstateMap = ifstate.Map()
-		policyJumpMap = jump.Map()
+		policyJumpMap = jump.Maps()
 		policyJumpMapXDP = jump.XDPMap()
 		profilingMap = profiling.Map()
-		ctlbProgsMap = nat.ProgramsMap()
+		ctlbProgsMap = nat.ProgramsMaps()
+		progMap = hook.NewProgramsMaps()
 		qosMap = qos.Map()
 		maglevMap = nat.MaglevMap()
 		maglevMapV6 = nat.MaglevMapV6()
+		allowSourcesMap = allowsources.Map()
+		allowSourcesMapV6 = allowsources.MapV6()
 
-		perfMap = perf.Map("perf_evnt", 512)
+		ringBufMap = ringbuf.Map("rb_evnt", 1024*1024)
+		ringBufDropsMap = ringbuf.DropsMap()
 
 		allMaps = []maps.Map{natMap, natBEMap, natMapV6, natBEMapV6, ctMap, ctMapV6, ctCleanupMap, ctCleanupMapV6, rtMap, rtMapV6, ipsMap, ipsMapV6,
 			stateMap, testStateMap, affinityMap, affinityMapV6, arpMap, arpMapV6, fsafeMap, fsafeMapV6,
-			countersMap, ipfragsMap, ipfragsMapTmp, ifstateMap, profilingMap,
-			policyJumpMap, policyJumpMapXDP, ctlbProgsMap[0], ctlbProgsMap[1], ctlbProgsMap[2], qosMap, maglevMap, maglevMapV6}
+			countersMap, ipfragsMap, ipfragsMapTmp, ipfragsFwdMap, ifstateMap, profilingMap,
+			policyJumpMap[0], policyJumpMap[1], policyJumpMapXDP, ctlbProgsMap[0], ctlbProgsMap[1], ctlbProgsMap[2], qosMap, maglevMap, maglevMapV6,
+			allowSourcesMap, allowSourcesMapV6, ringBufMap, ringBufDropsMap}
 		for _, m := range allMaps {
 			err := m.EnsureExists()
 			if err != nil {
@@ -643,12 +682,20 @@ func initMapsOnce() {
 			}
 		}
 
-		err := perfMap.EnsureExists()
-		if err != nil {
-			log.WithError(err).Panic("Failed to initialise perfMap")
-		}
-
 	})
+}
+
+func cleanupMap(m maps.Map) {
+	log.WithField("map", m.GetName()).Info("Cleaning")
+	err := m.Iter(func(_, _ []byte) maps.IteratorAction {
+		return maps.IterDelete
+	})
+	if err != nil {
+		if errors.Is(err, maps.ErrNotSupported) {
+			return
+		}
+		log.WithError(err).Panic("Failed to walk map")
+	}
 }
 
 func cleanUpMaps() {
@@ -659,19 +706,10 @@ func cleanUpMaps() {
 	defer log.SetLevel(logLevel)
 
 	for _, m := range allMaps {
-		if m == stateMap || m == testStateMap || m == progMap || m == countersMap || m == ipfragsMapTmp {
+		if m == stateMap || m == testStateMap || m == progMap[hook.Ingress] || m == progMap[hook.Egress] || m == countersMap || m == ipfragsMapTmp || m == ringBufDropsMap {
 			continue // Can't clean up array maps
 		}
-		log.WithField("map", m.GetName()).Info("Cleaning")
-		err := m.Iter(func(_, _ []byte) maps.IteratorAction {
-			return maps.IterDelete
-		})
-		if err != nil {
-			if errors.Is(err, maps.ErrNotSupported) {
-				continue
-			}
-			log.WithError(err).Panic("Failed to walk map")
-		}
+		cleanupMap(m)
 	}
 	log.Info("Cleaned up all maps")
 }
@@ -709,7 +747,7 @@ func ipToU32(ip net.IP) uint32 {
 	return binary.LittleEndian.Uint32([]byte(ip[:]))
 }
 
-func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflictProg, hasMaglev bool) error {
+func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflictProg, hasMaglev, useIngressProgMap bool) error {
 	for _, idx := range progs {
 		switch idx {
 		case
@@ -732,8 +770,12 @@ func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflic
 				continue
 			}
 		}
+		pmName := progMap[hook.Egress].GetName()
+		if useIngressProgMap {
+			pmName = progMap[hook.Ingress].GetName()
+		}
 		log.WithField("prog", tcdefs.ProgramNames[idx]).WithField("idx", idx).Debug("UpdateJumpMap")
-		err := obj.UpdateJumpMap(progMap.GetName(), tcdefs.ProgramNames[idx], idx)
+		err := obj.UpdateJumpMap(pmName, tcdefs.ProgramNames[idx], idx)
 		if err != nil {
 			return fmt.Errorf("error updating %s program: %w", tcdefs.ProgramNames[idx], err)
 		}
@@ -742,25 +784,31 @@ func tcUpdateJumpMap(obj *libbpf.Obj, progs []int, hasPolicyProg, hasHostConflic
 	return nil
 }
 
-func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostConflictProg, hasMaglev bool) (*libbpf.Obj, error) {
+func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostConflictProg, hasMaglev, useIngressProgMap bool) (*libbpf.Obj, error) {
 	log.WithField("program", fname).Debug("Loading BPF program")
 
 	forXDP := topts.xdp
 
 	// XXX we do not need to create both sets of maps, but, well, who cares here ;-)
-	progMap = hook.NewProgramsMap()
-	policyJumpMap = jump.Map()
+	progMap = hook.NewProgramsMaps()
+	policyJumpMap = jump.Maps()
 	progMapXDP = hook.NewXDPProgramsMap()
 	policyJumpMapXDP = jump.XDPMap()
 	if ipFamily == "preamble" {
-		_ = unix.Unlink(progMap.Path())
-		_ = unix.Unlink(policyJumpMap.Path())
+		_ = unix.Unlink(progMap[hook.Ingress].Path())
+		_ = unix.Unlink(progMap[hook.Egress].Path())
+		_ = unix.Unlink(policyJumpMap[hook.Ingress].Path())
+		_ = unix.Unlink(policyJumpMap[hook.Egress].Path())
 		_ = unix.Unlink(progMapXDP.Path())
 		_ = unix.Unlink(policyJumpMapXDP.Path())
 	}
-	err := progMap.EnsureExists()
+	err := progMap[hook.Ingress].EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
-	err = policyJumpMap.EnsureExists()
+	err = progMap[hook.Egress].EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	err = policyJumpMap[hook.Ingress].EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	err = policyJumpMap[hook.Egress].EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
 	err = progMapXDP.EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
@@ -782,11 +830,11 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 			}
 			if forXDP {
 				var globals libbpf.XDPGlobalData
-				for i := 0; i < 16; i++ {
+				for i := range 16 {
 					globals.Jumps[i] = uint32(i)
 				}
 				if topts.ipv6 {
-					for i := 0; i < 16; i++ {
+					for i := range 16 {
 						globals.JumpsV6[i] = uint32(i)
 					}
 				}
@@ -806,6 +854,7 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 					LogFilterJmp:  0xffffffff,
 					IfaceName:     setLogPrefix(ifaceLog),
 					MaglevLUTSize: testMaglevLUTSize,
+					IPFragTimeout: topts.ipfragTimeout,
 				}
 				if topts.flowLogsEnabled {
 					globals.Flags |= libbpf.GlobalsFlowLogsEnabled
@@ -822,17 +871,23 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 					globals.Flags |= libbpf.GlobalsEgressPacketRateConfigured
 				}
 
+				if topts.workloadSrcSpoofingConfigured {
+					globals.Flags |= libbpf.GlobalsWorkloadSrcSpoofingConfigured
+				}
+
 				globals.DSCP = -1
 				if topts.dscp >= 0 {
 					globals.DSCP = topts.dscp
 				}
+
+				globals.IstioDSCP = topts.istioDSCP
 
 				if topts.ipv6 {
 					copy(globals.HostTunnelIPv6[:], node1tunIPV6.To16())
 					copy(globals.HostIPv6[:], hostIP.To16())
 					copy(globals.IntfIPv6[:], intfIPV6.To16())
 
-					for i := 0; i < tcdefs.ProgIndexEnd; i++ {
+					for i := range tcdefs.ProgIndexEnd {
 						globals.JumpsV6[i] = uint32(i)
 					}
 					globals.Flags |= libbpf.GlobalsRPFOptionStrict
@@ -842,7 +897,7 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 					copy(globals.IntfIPv4[0:4], intfIP)
 					copy(globals.HostTunnelIPv4[0:4], node1tunIP.To4())
 
-					for i := 0; i < tcdefs.ProgIndexEnd; i++ {
+					for i := range tcdefs.ProgIndexEnd {
 						globals.Jumps[i] = uint32(i)
 					}
 					log.WithField("globals", globals).Debugf("configure program")
@@ -899,7 +954,10 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 		polProgPath = path.Join(bpfFsDir, polProgPath)
 		_, err = os.Stat(polProgPath)
 		if err == nil {
-			m := policyJumpMap
+			m := policyJumpMap[hook.Egress]
+			if useIngressProgMap {
+				m = policyJumpMap[hook.Ingress]
+			}
 			if forXDP {
 				m = policyJumpMapXDP
 			}
@@ -914,11 +972,11 @@ func objLoad(fname, bpfFsDir, ipFamily string, topts testOpts, polProg, hasHostC
 
 	if !forXDP {
 		log.WithField("ipFamily", ipFamily).Debug("Updating jump map")
-		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, hasHostConflictProg, hasMaglev)
+		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, hasHostConflictProg, hasMaglev, useIngressProgMap)
 		if err != nil && !strings.Contains(err.Error(), "error updating calico_tc_host_ct_conflict program") {
 			goto out
 		}
-		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, false, hasMaglev)
+		err = tcUpdateJumpMap(obj, tcJumpMapIndexes[ipFamily], false, false, hasMaglev, useIngressProgMap)
 	} else {
 		if err = xdpUpdateJumpMap(obj, xdpJumpMapIndexes[ipFamily]); err != nil {
 			goto out
@@ -1183,22 +1241,25 @@ func runBpfUnitTest(t *testing.T, source string, testFn func(bpfProgRunFn), opts
 }
 
 type testOpts struct {
-	description          string
-	subtests             bool
-	logLevel             log.Level
-	xdp                  bool
-	psnaStart            uint32
-	psnatEnd             uint32
-	hostNetworked        bool
-	fromHost             bool
-	progLog              string
-	ipv6                 bool
-	objname              string
-	flowLogsEnabled      bool
-	natOutExcludeHosts   bool
-	ingressQoSPacketRate bool
-	egressQoSPacketRate  bool
-	dscp                 int8
+	description                   string
+	subtests                      bool
+	logLevel                      log.Level
+	xdp                           bool
+	psnaStart                     uint32
+	psnatEnd                      uint32
+	hostNetworked                 bool
+	fromHost                      bool
+	progLog                       string
+	ipv6                          bool
+	objname                       string
+	flowLogsEnabled               bool
+	natOutExcludeHosts            bool
+	ingressQoSPacketRate          bool
+	egressQoSPacketRate           bool
+	dscp                          int8
+	istioDSCP                     int8
+	workloadSrcSpoofingConfigured bool
+	ipfragTimeout                 uint32
 }
 
 type testOption func(opts *testOpts)
@@ -1287,6 +1348,24 @@ func withObjName(name string) testOption {
 func withDescription(desc string) testOption {
 	return func(o *testOpts) {
 		o.description = desc
+	}
+}
+
+func withWorkloadSrcSpoofingConfigured() testOption {
+	return func(o *testOpts) {
+		o.workloadSrcSpoofingConfigured = true
+	}
+}
+
+func withIstioDSCP(value uint8) testOption {
+	return func(o *testOpts) {
+		o.istioDSCP = int8(value)
+	}
+}
+
+func withIPFragTimeout(timeout uint32) testOption {
+	return func(o *testOpts) {
+		o.ipfragTimeout = timeout
 	}
 }
 
@@ -2104,7 +2183,7 @@ func TestMapIterWithDelete(t *testing.T) {
 	err := m.EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		var k, v [8]byte
 
 		binary.LittleEndian.PutUint64(k[:], uint64(i))
@@ -2130,7 +2209,7 @@ func TestMapIterWithDelete(t *testing.T) {
 
 	Expect(cnt).To(Equal(10))
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		Expect(out).To(HaveKey(uint64(i)))
 		Expect(out[uint64(i)]).To(Equal(uint64(i * 7)))
 	}
@@ -2153,7 +2232,7 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 
 	items := 3*maps.IteratorNumKeys + 5
 
-	for i := 0; i < items; i++ {
+	for i := range items {
 		var k, v [8]byte
 
 		binary.LittleEndian.PutUint64(k[:], uint64(i))
@@ -2185,7 +2264,7 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 	Expect(len(out)).To(Equal(items))
 	Expect(cnt).To(Equal(items))
 
-	for i := 0; i < items; i++ {
+	for i := range items {
 		Expect(out).To(HaveKey(uint64(i)))
 		Expect(out[uint64(i)]).To(Equal(uint64(i * 7)))
 	}
@@ -2194,12 +2273,14 @@ func TestMapIterWithDeleteLastOfBatch(t *testing.T) {
 func TestJumpMap(t *testing.T) {
 	RegisterTestingT(t)
 
-	progMap = hook.NewProgramsMap()
-	err := progMap.EnsureExists()
+	progMap = hook.NewProgramsMaps()
+	err := progMap[hook.Ingress].EnsureExists()
+	Expect(err).NotTo(HaveOccurred())
+	err = progMap[hook.Egress].EnsureExists()
 	Expect(err).NotTo(HaveOccurred())
 
-	jumpMapFD := progMap.MapFD()
-	pg := polprog.NewBuilder(idalloc.New(), ipsMap.MapFD(), stateMap.MapFD(), jumpMapFD, policyJumpMap.MapFD(),
+	jumpMapFD := progMap[hook.Ingress].MapFD()
+	pg := polprog.NewBuilder(idalloc.New(), ipsMap.MapFD(), stateMap.MapFD(), jumpMapFD, policyJumpMap[hook.Ingress].MapFD(),
 		polprog.WithAllowDenyJumps(tcdefs.ProgIndexAllowed, tcdefs.ProgIndexDrop))
 	rules := polprog.Rules{}
 	insns, err := pg.Instructions(rules)

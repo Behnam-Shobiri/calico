@@ -90,13 +90,15 @@ void bpf_get_prog_name(uint prog_id, char *prog_name) {
 		set_errno(-prog_fd);
 		return;
         }
-	int len = sizeof(info);
+	__u32 len = sizeof(info);
 	int err = bpf_prog_get_info_by_fd(prog_fd, &info, &len);
 	if (err) {
+		close(prog_fd);
 		set_errno(err);
 		return;
 	}
 	memcpy(prog_name, info.name, strlen(info.name));
+	close(prog_fd);
 }
 
 struct bpf_link *bpf_link_open(char *path) {
@@ -121,28 +123,6 @@ int bpf_update_link(struct bpf_link *link, struct bpf_object *obj, char *progNam
 	return err;
 }
 
-int bpf_ctlb_get_prog_fd(int target_fd, int attach_type) {
-       int err;
-        __u32 attach_flags, prog_cnt, prog_id;
-
-        err = bpf_prog_query(target_fd, attach_type, 0, &attach_flags, &prog_id, &prog_cnt);
-        if (err) {
-                goto out;
-        }
-        int prog_fd = bpf_prog_get_fd_by_id(prog_id);
-        if (prog_fd < 0) {
-                err = -prog_fd;
-                goto out;
-        }
-out:
-        set_errno(err);
-        return prog_fd;
-}
-
-
-void bpf_ctlb_detach_legacy(int prog_fd, int target_fd, int attach_type) {
-        set_errno(bpf_prog_detach2(prog_fd, target_fd, attach_type));
-}
 
 int bpf_program_query(int ifindex, int attach_type, int flags, uint *attach_flags, uint *prog_ids, uint *prog_cnt) {
 	return bpf_prog_query(ifindex, attach_type, 0, attach_flags, prog_ids, prog_cnt);
@@ -279,7 +259,9 @@ void bpf_tc_set_globals(struct bpf_map *map,
 			uint *jumps,
 			uint *jumps6,
 			short dscp,
-			uint maglev_lut_size)
+			short istio_dscp,
+			uint maglev_lut_size,
+			uint ipfrag_timeout)
 {
 	struct cali_tc_global_data v4 = {
 		.tunnel_mtu = tmtu,
@@ -295,10 +277,12 @@ void bpf_tc_set_globals(struct bpf_map *map,
 		.overlay_tunnel_id = overlay_tunnel_id,
 		.log_filter_jmp = log_filter_jmp,
 		.dscp = dscp,
+		.istio_dscp = istio_dscp,
 		.maglev_lut_size = maglev_lut_size,
+		.ipfrag_timeout = ipfrag_timeout,
 	};
 
-	strncpy(v4.iface_name, iface_name, sizeof(v4.iface_name));
+	strncpy((char *)v4.iface_name, iface_name, sizeof(v4.iface_name));
 	v4.iface_name[sizeof(v4.iface_name)-1] = '\0';
 
 	struct cali_tc_global_data v6 = v4;
@@ -381,15 +365,15 @@ int bpf_program_attach_xdp(struct bpf_object *obj, char *name, int ifIndex, int 
 
 	int prog_fd = bpf_program__fd(prog);
 	if (prog_fd < 0) {
-		errno = -prog_fd;
-		return prog_fd;
+		err = prog_fd;
+		goto out;
 	}
 
 	err = bpf_xdp_attach(ifIndex, prog_fd, flags, &opts);
-	set_errno(err);
-	return err;
 
 out:
+	if (opts.old_prog_fd >= 0)
+		close(opts.old_prog_fd);
 	set_errno(err);
 	return err;
 }
@@ -417,29 +401,6 @@ out:
 	return link;
 }
 
-void bpf_program_attach_cgroup_legacy(struct bpf_object *obj, int cgroup_fd, char *name)
-{
-	int err = 0, prog_fd;
-	struct bpf_program *prog;
-	enum bpf_attach_type attach_type;
-
-	if (!(prog = bpf_object__find_program_by_name(obj, name))) {
-		err = ENOENT;
-		goto out;
-	}
-
-	prog_fd = bpf_program__fd(prog);
-	if (prog_fd < 0) {
-		err = EINVAL;
-		goto out;
-	}
-
-	attach_type = bpf_program__get_expected_attach_type(prog);
-	err = bpf_prog_attach(prog_fd, cgroup_fd, attach_type, 0);
-
-out:
-	set_errno(err);
-}
 
 void bpf_ctlb_set_globals(struct bpf_map *map, uint udp_not_seen_timeo, bool exclude_udp)
 {
@@ -456,7 +417,7 @@ void bpf_xdp_set_globals(struct bpf_map *map, char *iface_name, uint *jumps, uin
 	struct cali_xdp_preamble_globals data = {
 	};
 
-	strncpy(data.v4.iface_name, iface_name, sizeof(data.v4.iface_name));
+	strncpy((char *)data.v4.iface_name, iface_name, sizeof(data.v4.iface_name));
 	data.v4.iface_name[sizeof(data.v4.iface_name)-1] = '\0';
 	data.v6 = data.v4;
 
@@ -516,4 +477,17 @@ int create_bpf_map(enum bpf_map_type type, unsigned int key_size, unsigned int v
 		printf("libbpf warn: Error in bpf_map_create(%s):%s(%d).\n", name, cp, err);
 	}
 	return fd;
+}
+
+void bpf_set_program_autoload(struct bpf_object *obj, const char *progName, bool autoload)
+{
+	struct bpf_program *prog = bpf_object__find_program_by_name(obj, progName);
+	if (prog == NULL) {
+		errno = ENOENT;
+		return;
+	}
+	int ret = bpf_program__set_autoload(prog, autoload);
+	if (ret) {
+		set_errno(ret);
+	}
 }

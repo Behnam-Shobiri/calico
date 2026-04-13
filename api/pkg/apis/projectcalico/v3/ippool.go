@@ -1,4 +1,4 @@
-// Copyright (c) 2017, 2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ const (
 
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster,shortName={ipp,ipps,pool,pools}
 
 // IPPoolList contains a list of IPPool resources.
 type IPPoolList struct {
@@ -37,26 +38,74 @@ type IPPoolList struct {
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="CIDR",type=string,JSONPath=".spec.cidr",description="The pool CIDR"
+// +kubebuilder:printcolumn:name="VXLAN",type=string,JSONPath=".spec.vxlanMode",description="The VXLAN mode for this pool"
+// +kubebuilder:printcolumn:name="IPIP",type=string,JSONPath=".spec.ipipMode",description="The IPIP mode for this pool"
+// +kubebuilder:printcolumn:name="NAT",type=boolean,JSONPath=".spec.natOutgoing",description="Whether outgoing NAT is enabled for this pool"
+// +kubebuilder:printcolumn:name="Allocatable",type="string",JSONPath=".status.conditions[?(@.type=='Allocatable')].status",description="Whether or not this pool is available for IP allocations"
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp",description="The age of the pool"
 
 type IPPool struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
 
-	Spec IPPoolSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	Spec IPPoolSpec `json:"spec" protobuf:"bytes,2,opt,name=spec"`
+
+	// +optional
+	Status *IPPoolStatus `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
+}
+
+const (
+	// IPPoolConditionReady indicates whether the pool is ready to be used for IP address assignment.
+	IPPoolConditionAllocatable = "Allocatable"
+)
+
+const (
+	// IPPoolReasonCIDRInvalid indicates that the pool CIDR overlaps with another IP pool.
+	IPPoolReasonCIDROverlap = "CIDROverlap"
+
+	// IPPoolReasonTerminating indicates that the pool is terminating and cannot be used for new IP address assignments.
+	IPPoolReasonTerminating = "Terminating"
+
+	// IPPoolReasonDisabled indicates the pool is administratively disabled and cannot be used for new IP address assignments.
+	IPPoolReasonDisabled = "PoolDisabled"
+
+	// IPPoolReasonOK indicates that the pool is ready to be used for IP address assignment.
+	IPPoolReasonOK = "OK"
+)
+
+type IPPoolStatus struct {
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 // IPPoolSpec contains the specification for an IPPool resource.
+// +kubebuilder:validation:XValidation:rule="!has(self.ipipMode) || !has(self.vxlanMode) || self.ipipMode == 'Never' || self.vxlanMode == 'Never' || size(self.ipipMode) == 0 || size(self.vxlanMode) == 0",message="ipipMode and vxlanMode cannot both be enabled",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.allowedUses) || !self.allowedUses.exists(u, u == 'LoadBalancer') || (!has(self.ipipMode) || size(self.ipipMode) == 0 || self.ipipMode == 'Never') && (!has(self.vxlanMode) || size(self.vxlanMode) == 0 || self.vxlanMode == 'Never')",message="LoadBalancer IP pool cannot have IPIP or VXLAN enabled",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.allowedUses) || !self.allowedUses.exists(u, u == 'LoadBalancer') || !self.allowedUses.exists(u, u == 'Workload' || u == 'Tunnel')",message="LoadBalancer cannot be combined with Workload or Tunnel allowed uses",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="cidr(self.cidr).ip().family() != 6 || !has(self.ipipMode) || self.ipipMode == 'Never' || size(self.ipipMode) == 0",message="IPIP is not supported on IPv6 pools",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.allowedUses) || !self.allowedUses.exists(u, u == 'LoadBalancer') || !has(self.disableBGPExport) || !self.disableBGPExport",message="LoadBalancer IP pools cannot disable BGP export",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.allowedUses) || !self.allowedUses.exists(u, u == 'LoadBalancer') || self.nodeSelector == 'all()'",message="IP Pool with AllowedUse LoadBalancer must have nodeSelector set to all()",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="!has(self.allowedUses) || !self.allowedUses.exists(u, u == 'Tunnel') || !has(self.namespaceSelector) || size(self.namespaceSelector) == 0",message="IP Pool with AllowedUse Tunnel cannot have namespaceSelector",reason=FieldValueForbidden
+// +kubebuilder:validation:XValidation:rule="!has(self.nodeSelector) || !self.nodeSelector.contains('global(')",message="global() selector is not valid for IPPool nodeSelector",reason=FieldValueInvalid
+// +kubebuilder:validation:XValidation:rule="!has(self.namespaceSelector) || !self.namespaceSelector.contains('global(')",message="global() selector is not valid for IPPool namespaceSelector",reason=FieldValueInvalid
 type IPPoolSpec struct {
 	// The pool CIDR.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Format=cidr
+	// +kubebuilder:validation:MaxLength=48
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="CIDR cannot be changed; follow IP pool migration guide to avoid corruption.",reason=FieldValueInvalid
 	CIDR string `json:"cidr" validate:"net"`
 
-	// Contains configuration for VXLAN tunneling for this pool. If not specified,
-	// then this is defaulted to "Never" (i.e. VXLAN tunneling is disabled).
-	VXLANMode VXLANMode `json:"vxlanMode,omitempty" validate:"omitempty,vxlanMode"`
+	// Contains configuration for VXLAN tunneling for this pool.
+	VXLANMode VXLANMode `json:"vxlanMode,omitempty"`
 
-	// Contains configuration for IPIP tunneling for this pool. If not specified,
-	// then this is defaulted to "Never" (i.e. IPIP tunneling is disabled).
-	IPIPMode IPIPMode `json:"ipipMode,omitempty" validate:"omitempty,ipIpMode"`
+	// Contains configuration for IPIP tunneling for this pool.
+	// For IPv6 pools, IPIP tunneling must be disabled.
+	IPIPMode IPIPMode `json:"ipipMode,omitempty"`
 
 	// When natOutgoing is true, packets sent from Calico networked containers in
 	// this pool to destinations outside of this pool will be masqueraded.
@@ -69,41 +118,58 @@ type IPPoolSpec struct {
 	DisableBGPExport bool `json:"disableBGPExport,omitempty" validate:"omitempty"`
 
 	// The block size to use for IP address assignments from this pool. Defaults to 26 for IPv4 and 122 for IPv6.
+	// The block size must be between 0 and 32 for IPv4 and between 0 and 128 for IPv6. It must also be smaller than
+	// or equal to the size of the pool CIDR.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=128
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Block size cannot be changed; follow IP pool migration guide to avoid corruption.",reason=FieldValueInvalid
 	BlockSize int `json:"blockSize,omitempty"`
 
 	// Allows IPPool to allocate for a specific node by label selector.
+	// +kubebuilder:default="all()"
+	// +kubebuilder:validation:MaxLength=1024
 	NodeSelector string `json:"nodeSelector,omitempty" validate:"omitempty,selector"`
 
 	// Allows IPPool to allocate for a specific namespace by label selector.
 	// If specified, both namespaceSelector and nodeSelector must match for the pool to be used.
+	// +kubebuilder:validation:MaxLength=1024
 	NamespaceSelector string `json:"namespaceSelector,omitempty" validate:"omitempty,selector"`
 
-	// Deprecated: this field is only used for APIv1 backwards compatibility.
-	// Setting this field is not allowed, this field is for internal use only.
-	IPIP *IPIPConfiguration `json:"ipip,omitempty" validate:"omitempty,mustBeNil"`
-
-	// Deprecated: this field is only used for APIv1 backwards compatibility.
-	// Setting this field is not allowed, this field is for internal use only.
-	NATOutgoingV1 bool `json:"nat-outgoing,omitempty" validate:"omitempty,mustBeFalse"`
-
-	// AllowedUse controls what the IP pool will be used for.  If not specified or empty, defaults to
-	// ["Tunnel", "Workload"] for back-compatibility
+	// AllowedUses controls what the IP pool will be used for. If not specified or empty, defaults to
+	// ["Tunnel", "Workload"] for back-compatibility. Valid values: "Tunnel", "Workload", "LoadBalancer".
+	// +kubebuilder:validation:MaxItems=10
+	// +listType=set
 	AllowedUses []IPPoolAllowedUse `json:"allowedUses,omitempty" validate:"omitempty"`
 
 	// Determines the mode how IP addresses should be assigned from this pool
 	// +optional
 	// +kubebuilder:default=Automatic
-	AssignmentMode *AssignmentMode `json:"assignmentMode,omitempty" validate:"omitempty,assignmentMode"`
+	AssignmentMode *AssignmentMode `json:"assignmentMode,omitempty"`
 }
 
+// IPPoolAllowedUse defines the allowed uses for an IP pool.
+// It can be one of "Workload", "Tunnel", or "LoadBalancer".
+// - "Workload" means the pool is used for workload IP addresses.
+// - "Tunnel" means the pool is used for tunnel IP addresses.
+// - "LoadBalancer" means the pool is used for load balancer IP addresses.
+// +kubebuilder:validation:Enum=Workload;Tunnel;LoadBalancer
 type IPPoolAllowedUse string
 
 const (
-	IPPoolAllowedUseWorkload     IPPoolAllowedUse = "Workload"
-	IPPoolAllowedUseTunnel       IPPoolAllowedUse = "Tunnel"
+	IPPoolAllowedUseWorkload IPPoolAllowedUse = "Workload"
+	IPPoolAllowedUseTunnel   IPPoolAllowedUse = "Tunnel"
+
+	// IPPoolAllowedUseLoadBalancer designates that the pool is used for load balancer IP addresses.
+	// Not compatible with IPIP or VXLAN.
 	IPPoolAllowedUseLoadBalancer IPPoolAllowedUse = "LoadBalancer"
 )
 
+// VXLANMode defines the mode of VXLAN tunneling for an IP pool.
+// It can be one of "Never", "Always", or "CrossSubnet".
+// - "Never" means VXLAN tunneling is disabled for this pool.
+// - "Always" means VXLAN tunneling is used for all traffic to this pool.
+// - "CrossSubnet" means VXLAN tunneling is used only when the destination node is on a different subnet.
+// +kubebuilder:validation:Enum=Never;Always;CrossSubnet
 type VXLANMode string
 
 const (
@@ -112,6 +178,12 @@ const (
 	VXLANModeCrossSubnet VXLANMode = "CrossSubnet"
 )
 
+// IPIPMode defines the mode of IPIP tunneling for an IP pool.
+// It can be one of "Never", "Always", or "CrossSubnet".
+// - "Never" means IPIP tunneling is disabled for this pool.
+// - "Always" means IPIP tunneling is used for all traffic to this pool.
+// - "CrossSubnet" means IPIP tunneling is used only when the destination node is on a different subnet.
+// +kubebuilder:validation:Enum=Never;Always;CrossSubnet
 type IPIPMode string
 
 const (
@@ -125,7 +197,7 @@ const (
 type EncapMode string
 
 const (
-	Undefined   EncapMode = ""
+	Never       EncapMode = ""
 	Always      EncapMode = "always"
 	CrossSubnet EncapMode = "cross-subnet"
 )
@@ -150,7 +222,7 @@ type IPIPConfiguration struct {
 	// addresses within this pool.  A mode of "cross-subnet" will only use IPIP
 	// tunneling when the destination node is on a different subnet to the
 	// originating node.  The default value (if not specified) is "always".
-	Mode EncapMode `json:"mode,omitempty" validate:"ipIpMode"`
+	Mode EncapMode `json:"mode,omitempty"`
 }
 
 // NewIPPool creates a new (zeroed) IPPool struct with the TypeMetadata initialised to the current

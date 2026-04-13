@@ -236,8 +236,13 @@ message ActivePolicyRemove {
 }
 
 message PolicyID {
-  string tier = 1;
+  // The "tier" field has been deprecated and removed.
+  reserved 1;
+  reserved "tier";
+
   string name = 2;
+  string namespace = 3;
+  string kind = 4;
 }
 
 message Policy {
@@ -253,6 +258,8 @@ message Policy {
   string original_selector = 6;
 
   repeated string perf_hints = 7;
+
+  string tier = 8;
 }
 
 enum IPVersion {
@@ -332,7 +339,7 @@ message Rule {
 
   RuleMetadata metadata = 123;
 
-  // Changed to config option.
+  // Changed to FelixConfig option.
   reserved 200;
   reserved "log_prefix";
 
@@ -398,6 +405,12 @@ message WorkloadBpfSkipRedir {
   bool Ingress = 2;
 }
 
+enum LiveMigrationRole {
+  NO_ROLE = 0;
+  SOURCE = 1;
+  TARGET = 2;
+}
+
 message WorkloadEndpoint {
   string state = 1;
   string name = 2;
@@ -414,6 +427,10 @@ message WorkloadEndpoint {
   LocalBGPPeer local_bgp_peer = 13;
   WorkloadBpfSkipRedir skip_redir = 14;
   repeated QoSPolicy qos_policies = 15;
+  bool is_istio_ambient = 16;
+  LiveMigrationRole live_migration_role = 17;
+  string live_migration_uid = 18;
+  string live_migration_vmi_name = 19;
 }
 
 message QoSControls {
@@ -476,8 +493,8 @@ message HostEndpointRemove {
 
 message TierInfo {
   string name = 1;
-  repeated string ingress_policies = 2;
-  repeated string egress_policies = 3;
+  repeated PolicyID ingress_policies = 2;
+  repeated PolicyID egress_policies = 3;
   string default_action = 4;
 }
 

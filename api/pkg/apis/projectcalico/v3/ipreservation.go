@@ -25,6 +25,7 @@ const (
 
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster
 
 // IPReservationList contains a list of IPReservation resources.
 type IPReservationList struct {
@@ -37,6 +38,7 @@ type IPReservationList struct {
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster
 
 // IPReservation allows certain IP addresses to be reserved (i.e. prevented from being allocated) by Calico
 // IPAM.  Reservations only block new allocations, they do not cause existing IP allocations to be released.
@@ -45,14 +47,17 @@ type IPReservationList struct {
 // to find a non-reserved IP.
 type IPReservation struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
 
-	Spec IPReservationSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	Spec IPReservationSpec `json:"spec" protobuf:"bytes,2,opt,name=spec"`
 }
 
 // IPReservationSpec contains the specification for an IPReservation resource.
 type IPReservationSpec struct {
-	// ReservedCIDRs is a list of CIDRs and/or IP addresses that Calico IPAM will exclude from new allocations.
+	// ReservedCIDRs is a list of CIDRs that Calico IPAM will exclude from new allocations.
+	// Each entry must be in CIDR notation (e.g., "10.0.0.0/24" or "10.0.0.1/32" for a single IP).
+	// +listType=set
+	// +kubebuilder:validation:Format=cidr
 	ReservedCIDRs []string `json:"reservedCIDRs,omitempty" validate:"cidrs,omitempty"`
 }
 

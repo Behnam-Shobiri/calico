@@ -37,6 +37,8 @@ func NewStorage(opts Options) (registry.DryRunnableStorage, factory.DestroyFunc)
 		return NewStagedGlobalNetworkPolicyStorage(opts)
 	case "projectcalico.org/tiers":
 		return NewTierStorage(opts)
+	case "projectcalico.org/tiers/status":
+		return NewTierStatusStorage(opts)
 	case "projectcalico.org/globalnetworksets":
 		return NewGlobalNetworkSetStorage(opts)
 	case "projectcalico.org/networksets":
@@ -45,6 +47,8 @@ func NewStorage(opts Options) (registry.DryRunnableStorage, factory.DestroyFunc)
 		return NewHostEndpointStorage(opts)
 	case "projectcalico.org/ippools":
 		return NewIPPoolStorage(opts)
+	case "projectcalico.org/ippools/status":
+		return NewIPPoolStatusStorage(opts)
 	case "projectcalico.org/ipreservations":
 		return NewIPReservationStorage(opts)
 	case "projectcalico.org/bgpconfigurations":
@@ -59,10 +63,14 @@ func NewStorage(opts Options) (registry.DryRunnableStorage, factory.DestroyFunc)
 		return NewFelixConfigurationStorage(opts)
 	case "projectcalico.org/kubecontrollersconfigurations":
 		return NewKubeControllersConfigurationStorage(opts)
+	case "projectcalico.org/kubecontrollersconfigurations/status":
+		return NewKubeControllersConfigurationStatusStorage(opts)
 	case "projectcalico.org/clusterinformations":
 		return NewClusterInformationStorage(opts)
 	case "projectcalico.org/caliconodestatuses":
 		return NewCalicoNodeStatusStorage(opts)
+	case "projectcalico.org/caliconodestatuses/status":
+		return NewCalicoNodeStatusStatusStorage(opts)
 	case "projectcalico.org/ipamconfigurations":
 		return NewIPAMConfigurationStorage(opts)
 	case "projectcalico.org/blockaffinities":

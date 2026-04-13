@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -534,6 +534,16 @@ func (m nftMatch) NotICMPV6TypeAndCode(t, c uint8) generictables.MatchCriteria {
 	return m
 }
 
+// The expected rate must be an integer (0~9999) with /second, /minute, /hour, or /day suffix.
+func (m nftMatch) Limit(rate string, burst uint16) generictables.MatchCriteria {
+	if burst > 0 {
+		m.clauses = append(m.clauses, fmt.Sprintf("limit rate %s burst %d packets", rate, burst))
+	} else {
+		m.clauses = append(m.clauses, fmt.Sprintf("limit rate %s", rate))
+	}
+	return m
+}
+
 func (m nftMatch) InInterfaceVMAP(name string) generictables.MatchCriteria {
 	m.clauses = append(m.clauses, fmt.Sprintf("iifname vmap @<LAYER>-%s", LegalizeSetName(name)))
 	return m
@@ -541,6 +551,16 @@ func (m nftMatch) InInterfaceVMAP(name string) generictables.MatchCriteria {
 
 func (m nftMatch) OutInterfaceVMAP(name string) generictables.MatchCriteria {
 	m.clauses = append(m.clauses, fmt.Sprintf("oifname vmap @<LAYER>-%s", LegalizeSetName(name)))
+	return m
+}
+
+func (m nftMatch) ARPOperation(op string) generictables.MatchCriteria {
+	m.clauses = append(m.clauses, fmt.Sprintf("arp operation %s", op))
+	return m
+}
+
+func (m nftMatch) ARPSrcIP(ip string) generictables.MatchCriteria {
+	m.clauses = append(m.clauses, fmt.Sprintf("arp saddr ip %s", ip))
 	return m
 }
 

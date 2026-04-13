@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,15 +19,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
-	libapiv3 "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
+	"github.com/projectcalico/calico/libcalico-go/lib/apis/internalapi"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend"
 	backendapi "github.com/projectcalico/calico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
@@ -299,13 +298,13 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests", testutils.DatastoreAll, f
 				By("Updating IPPool name2 with a 2s TTL and waiting for the entry to be deleted")
 				_, outError = c.IPPools().Update(ctx, res2, options.SetOptions{TTL: 2 * time.Second})
 				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(1 * time.Second)
-				_, outError = c.IPPools().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(2 * time.Second)
-				_, outError = c.IPPools().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(ContainSubstring("resource does not exist: IPPool(" + name2 + ") with error:"))
+				Eventually(func() string {
+					_, err := c.IPPools().Get(ctx, name2, options.GetOptions{})
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}, 5*time.Second, 200*time.Millisecond).Should(ContainSubstring("resource does not exist: IPPool(" + name2 + ") with error:"))
 
 				By("Creating IPPool name2 with a 2s TTL and waiting for the entry to be deleted")
 				_, outError = c.IPPools().Create(ctx, &apiv3.IPPool{
@@ -313,13 +312,13 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests", testutils.DatastoreAll, f
 					Spec:       spec2,
 				}, options.SetOptions{TTL: 2 * time.Second})
 				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(1 * time.Second)
-				_, outError = c.IPPools().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(2 * time.Second)
-				_, outError = c.IPPools().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(ContainSubstring("resource does not exist: IPPool(" + name2 + ") with error:"))
+				Eventually(func() string {
+					_, err := c.IPPools().Get(ctx, name2, options.GetOptions{})
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}, 5*time.Second, 200*time.Millisecond).Should(ContainSubstring("resource does not exist: IPPool(" + name2 + ") with error:"))
 			}
 
 			if config.Spec.DatastoreType == apiconfig.Kubernetes {
@@ -1065,7 +1064,7 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests (etcd only)", testutils.Dat
 
 			// Create test node
 			host := "host-test"
-			_, err = c.Nodes().Create(ctx, &libapiv3.Node{ObjectMeta: metav1.ObjectMeta{Name: host}}, options.SetOptions{})
+			_, err = c.Nodes().Create(ctx, &internalapi.Node{ObjectMeta: metav1.ObjectMeta{Name: host}}, options.SetOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			// Allocate an IP so that a block is allocated
@@ -1141,7 +1140,7 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests (etcd only)", testutils.Dat
 			Expect(err).NotTo(HaveOccurred())
 
 			host := "host-test"
-			_, err = c.Nodes().Create(ctx, &libapiv3.Node{ObjectMeta: metav1.ObjectMeta{Name: host}}, options.SetOptions{})
+			_, err = c.Nodes().Create(ctx, &internalapi.Node{ObjectMeta: metav1.ObjectMeta{Name: host}}, options.SetOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			// Allocate an IP so that a block is allocated
@@ -1176,6 +1175,68 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests (etcd only)", testutils.Dat
 			_, err = c.IPPools().Delete(ctx, "ippool1", options.DeleteOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = c.IPPools().Delete(ctx, "ippool2", options.DeleteOptions{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("IPPool UpdateStatus functionality", func() {
+		It("should set and preserve status across spec updates", func() {
+			c, err := clientv3.New(config)
+			Expect(err).NotTo(HaveOccurred())
+
+			be, err := backend.NewClient(config)
+			Expect(err).NotTo(HaveOccurred())
+			be.Clean()
+
+			By("Creating an IPPool")
+			pool, err := c.IPPools().Create(ctx, &apiv3.IPPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "ippool-status-test"},
+				Spec: apiv3.IPPoolSpec{
+					CIDR: "10.0.0.0/24",
+				},
+			}, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Setting status via UpdateStatus")
+			pool.Status = &apiv3.IPPoolStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             metav1.ConditionTrue,
+						Reason:             "PoolReady",
+						Message:            "Pool is ready",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+			pool, err = c.IPPools().UpdateStatus(ctx, pool, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pool.Status).NotTo(BeNil())
+			Expect(pool.Status.Conditions).To(HaveLen(1))
+			Expect(pool.Status.Conditions[0].Type).To(Equal("Ready"))
+
+			By("Getting the pool and verifying status is present")
+			pool, err = c.IPPools().Get(ctx, "ippool-status-test", options.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pool.Status).NotTo(BeNil())
+			Expect(pool.Status.Conditions).To(HaveLen(1))
+			Expect(pool.Status.Conditions[0].Type).To(Equal("Ready"))
+
+			By("Updating the pool spec and verifying status is preserved")
+			pool.Spec.NATOutgoing = true
+			pool, err = c.IPPools().Update(ctx, pool, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Getting the pool and verifying status is still present after spec update")
+			pool, err = c.IPPools().Get(ctx, "ippool-status-test", options.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pool.Spec.NATOutgoing).To(BeTrue())
+			Expect(pool.Status).NotTo(BeNil())
+			Expect(pool.Status.Conditions).To(HaveLen(1))
+			Expect(pool.Status.Conditions[0].Type).To(Equal("Ready"))
+
+			By("Cleaning up")
+			_, err = c.IPPools().Delete(ctx, "ippool-status-test", options.DeleteOptions{})
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})

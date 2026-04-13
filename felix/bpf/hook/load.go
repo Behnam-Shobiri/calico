@@ -19,7 +19,6 @@ import (
 	"sync"
 
 	tcdefs "github.com/projectcalico/calico/felix/bpf/tc/defs"
-	bpfutils "github.com/projectcalico/calico/felix/bpf/utils"
 )
 
 func init() {
@@ -149,7 +148,6 @@ func initObjectFiles() {
 	for _, family := range []int{4, 6} {
 		for _, logLevel := range []string{"off", "debug"} {
 			for _, epToHostDrop := range []bool{false, true} {
-				epToHostDrop := epToHostDrop
 				epTypes := []tcdefs.EndpointType{
 					tcdefs.EpTypeWorkload,
 					tcdefs.EpTypeHost,
@@ -160,9 +158,7 @@ func initObjectFiles() {
 					tcdefs.EpTypeVXLAN,
 				}
 				for _, epType := range epTypes {
-					epType := epType
 					for _, hook := range []Hook{Ingress, Egress} {
-						hook := hook
 						for _, dsr := range []bool{false, true} {
 							toOrFrom := tcdefs.ToEp
 							if hook == Ingress {
@@ -184,7 +180,6 @@ func initObjectFiles() {
 								epToHostDrop,
 								dsr,
 								logLevel,
-								bpfutils.BTFEnabled,
 							)
 							SetObjectFile(attachType, filename)
 						}
@@ -202,7 +197,7 @@ func initObjectFiles() {
 			}
 			filename := "xdp_" + l + ".o"
 			if family == 6 {
-				filename = "xdp_" + l + "_co-re_v6.o"
+				filename = "xdp_" + l + "_v6.o"
 			}
 
 			SetObjectFile(AttachType{

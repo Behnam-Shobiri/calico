@@ -35,6 +35,14 @@ var (
 	})
 )
 
+const (
+	// Base of range for reserved IP set IDs for Calico Enterprise.
+	ReservedIPSetBase uint64 = 1 << 32
+
+	// IP set ID for All Istio WEPs.
+	AllIstioWEPsID = ReservedIPSetBase + 3
+)
+
 func init() {
 	prometheus.MustRegister(bpfIPSetsGauge)
 }
@@ -316,16 +324,17 @@ func (m *bpfIPSets) ApplyUpdates(_ ipsets.UpdateListener) {
 		}
 	}
 
-	m.dirtyIPSetIDs.Iter(func(setID uint64) error {
+	for setID := range m.dirtyIPSetIDs.All() {
 		leaveDirty := false
 		ipSet := m.getExistingIPSet(setID)
 		if ipSet == nil {
 			m.lg.WithField("id", setID).Warn("Couldn't find IP set that was marked as dirty.")
 			m.resyncScheduled = true
-			return set.RemoveItem
+			m.dirtyIPSetIDs.Discard(setID)
+			continue
 		}
 
-		ipSet.PendingRemoves.Iter(func(entry IPSetEntryInterface) error {
+		for entry := range ipSet.PendingRemoves.All() {
 			if debug {
 				m.lg.WithFields(log.Fields{"setID": setID, "entry": entry}).Debug("Removing entry from IP set")
 			}
@@ -333,13 +342,13 @@ func (m *bpfIPSets) ApplyUpdates(_ ipsets.UpdateListener) {
 			if err != nil {
 				m.lg.WithFields(log.Fields{"setID": setID, "entry": entry}).WithError(err).Error("Failed to remove IP set entry")
 				leaveDirty = true
-				return nil
+				continue
 			}
 			numDels++
-			return set.RemoveItem
-		})
+			ipSet.PendingRemoves.Discard(entry)
+		}
 
-		ipSet.PendingAdds.Iter(func(entry IPSetEntryInterface) error {
+		for entry := range ipSet.PendingAdds.All() {
 			if debug {
 				m.lg.WithFields(log.Fields{"setID": setID, "entry": entry}).Debug("Adding entry to IP set")
 			}
@@ -347,16 +356,16 @@ func (m *bpfIPSets) ApplyUpdates(_ ipsets.UpdateListener) {
 			if err != nil {
 				m.lg.WithFields(log.Fields{"setID": setID, "entry": entry}).WithError(err).Error("Failed to add IP set entry")
 				leaveDirty = true
-				return nil
+				continue
 			}
 			numAdds++
-			return set.RemoveItem
-		})
+			ipSet.PendingAdds.Discard(entry)
+		}
 
 		if leaveDirty {
 			m.lg.WithField("setID", setID).Debug("IP set still dirty, queueing resync")
 			m.resyncScheduled = true
-			return nil
+			continue
 		}
 
 		if ipSet.Deleted {
@@ -365,8 +374,8 @@ func (m *bpfIPSets) ApplyUpdates(_ ipsets.UpdateListener) {
 		}
 
 		m.lg.WithField("setID", setID).Debug("IP set is now clean")
-		return set.RemoveItem
-	})
+		m.dirtyIPSetIDs.Discard(setID)
+	}
 
 	duration := time.Since(startTime)
 	if numDels > 0 || numAdds > 0 {
@@ -448,10 +457,9 @@ func (m *bpfIPSet) ReplaceMembers(members []string, protoIPSetMemberToBPFEntry f
 }
 
 func (m *bpfIPSet) RemoveAll() {
-	m.DesiredEntries.Iter(func(entry IPSetEntryInterface) error {
+	for entry := range m.DesiredEntries.All() {
 		m.RemoveMember(entry)
-		return nil
-	})
+	}
 }
 
 func (m *bpfIPSet) AddMembers(members []string, protoIPSetMemberToBPFEntry func(uint64, string) IPSetEntryInterface) {

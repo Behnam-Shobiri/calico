@@ -55,6 +55,7 @@ import (
 	"github.com/projectcalico/calico/felix/rules"
 	"github.com/projectcalico/calico/felix/wireguard"
 	"github.com/projectcalico/calico/libcalico-go/lib/health"
+	"github.com/projectcalico/calico/libcalico-go/lib/ipam"
 )
 
 func StartDataplaneDriver(
@@ -65,6 +66,7 @@ func StartDataplaneDriver(
 	fatalErrorCallback func(error),
 	k8sClientSet *kubernetes.Clientset,
 	lc *calc.LookupsCache,
+	ipamClient ipam.Interface,
 ) (DataplaneDriver, *exec.Cmd) {
 	if !configParams.IsLeader() {
 		// Return an inactive dataplane, since we're not the leader.
@@ -225,7 +227,7 @@ func StartDataplaneDriver(
 			},
 			RulesConfig: rules.Config{
 				FlowLogsEnabled:       configParams.FlowLogsEnabled(),
-				NFTables:              configParams.NFTablesMode == "Enabled",
+				NFTablesMode:          configParams.NFTablesMode,
 				WorkloadIfacePrefixes: configParams.InterfacePrefixes(),
 
 				IPSetConfigV4: ipsets.NewIPVersionConfig(
@@ -280,7 +282,10 @@ func StartDataplaneDriver(
 				WireguardEncryptHostTraffic: configParams.WireguardHostEncryptionEnabled,
 				RouteSource:                 configParams.RouteSource,
 
-				LogPrefix:            configParams.LogPrefix,
+				LogPrefix:               configParams.LogPrefix,
+				LogActionRateLimit:      configParams.LogActionRateLimit,
+				LogActionRateLimitBurst: configParams.LogActionRateLimitBurst,
+
 				EndpointToHostAction: configParams.DefaultEndpointToHostAction,
 				FilterAllowAction:    configParams.FilterAllowAction(),
 				MangleAllowAction:    configParams.MangleAllowAction(),
@@ -298,6 +303,8 @@ func StartDataplaneDriver(
 				BPFEnabled:                         configParams.BPFEnabled,
 				BPFForceTrackPacketsFromIfaces:     replaceWildcards(configParams.NFTablesMode == "Enabled", configParams.BPFForceTrackPacketsFromIfaces),
 				ServiceLoopPrevention:              configParams.ServiceLoopPrevention,
+				IstioAmbientModeEnabled:            configParams.IsIstioAmbientModeEnabled(),
+				IstioDSCPMark:                      configParams.IstioDSCPMark.ToUint8(),
 			},
 			Wireguard: wireguard.Config{
 				Enabled:             wireguardEnabled,
@@ -409,6 +416,7 @@ func StartDataplaneDriver(
 			BPFRedirectToPeer:                  configParams.BPFRedirectToPeer,
 			BPFAttachType:                      configParams.GetBPFAttachType(),
 			BPFProfiling:                       configParams.BPFProfiling,
+			BPFIPFragTimeout:                   configParams.BPFIPFragTimeout,
 			ServiceLoopPrevention:              configParams.ServiceLoopPrevention,
 
 			KubeClientSet: k8sClientSet,
@@ -417,6 +425,15 @@ func StartDataplaneDriver(
 			FeatureGates:           configParams.FeatureGates,
 
 			RouteSource: configParams.RouteSource,
+
+			IPv4NormalRoutePriority:   configParams.IPv4NormalRoutePriority,
+			IPv4ElevatedRoutePriority: configParams.IPv4ElevatedRoutePriority,
+			IPv6NormalRoutePriority:   configParams.IPv6NormalRoutePriority,
+			IPv6ElevatedRoutePriority: configParams.IPv6ElevatedRoutePriority,
+
+			LiveMigrationRouteConvergenceTime: configParams.LiveMigrationRouteConvergenceTime,
+
+			IPAMClient: ipamClient,
 
 			KubernetesProvider: configParams.KubernetesProvider(),
 			Collector:          collector,
@@ -429,6 +446,10 @@ func StartDataplaneDriver(
 		if configParams.BPFExternalServiceMode == "dsr" {
 			dpConfig.BPFNodePortDSREnabled = true
 			dpConfig.BPFDSROptoutCIDRs = configParams.BPFDSROptoutCIDRs
+		}
+
+		if configParams.WorkloadSourceSpoofing == "Any" {
+			dpConfig.WorkloadSourceSpoofing = true
 		}
 
 		intDP := intdataplane.NewIntDataplaneDriver(dpConfig)

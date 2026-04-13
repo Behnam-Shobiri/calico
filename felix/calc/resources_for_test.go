@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -355,7 +355,36 @@ var (
 	order30 = float64(30)
 )
 
+// A variation of policy1_order20 but in tier-1 instead of default tier.
+var policy1_tier1_order20 = model.Policy{
+	Tier:     "tier-1",
+	Order:    &order20,
+	Selector: "a == 'a'",
+	InboundRules: []model.Rule{
+		{SrcSelector: allSelector},
+	},
+	OutboundRules: []model.Rule{
+		{SrcSelector: bEpBSelector},
+	},
+	Types: []string{"ingress", "egress"},
+}
+
 var policy1_order20 = model.Policy{
+	Tier:     "default",
+	Order:    &order20,
+	Selector: "a == 'a'",
+	InboundRules: []model.Rule{
+		{SrcSelector: allSelector},
+	},
+	OutboundRules: []model.Rule{
+		{SrcSelector: bEpBSelector},
+	},
+	Types: []string{"ingress", "egress"},
+}
+
+// A variation of policy1_order20 but in tier-2 instead of default tier.
+var policy1_tier2_order20 = model.Policy{
+	Tier:     "tier-2",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -368,6 +397,7 @@ var policy1_order20 = model.Policy{
 }
 
 var policy1_order20_always = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -381,6 +411,7 @@ var policy1_order20_always = model.Policy{
 }
 
 var policy1_order20_ondemand = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -397,12 +428,13 @@ var (
 	protoTCP                                = numorstring.ProtocolFromStringV1("tcp")
 	protoUDP                                = numorstring.ProtocolFromStringV1("udp")
 	policy1_order20_with_named_port_tcpport = model.Policy{
+		Tier:     "default",
 		Order:    &order20,
 		Selector: "a == 'a'",
 		InboundRules: []model.Rule{
 			{
 				Protocol: &protoTCP,
-				SrcPorts: []numorstring.Port{numorstring.NamedPort("tcpport")},
+				SrcPorts: []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 			},
 		},
 		OutboundRules: []model.Rule{
@@ -413,12 +445,13 @@ var (
 )
 
 var policy1_order20_with_named_port_tcpport_negated = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
 		{
 			Protocol:    &protoTCP,
-			NotSrcPorts: []numorstring.Port{numorstring.NamedPort("tcpport")},
+			NotSrcPorts: []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 		},
 	},
 	OutboundRules: []model.Rule{
@@ -428,13 +461,14 @@ var policy1_order20_with_named_port_tcpport_negated = model.Policy{
 }
 
 var policy_with_named_port_inherit = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
 		{
 			Protocol:    &protoTCP,
 			SrcSelector: "profile == 'prof-1'",
-			SrcPorts:    []numorstring.Port{numorstring.NamedPort("tcpport")},
+			SrcPorts:    []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 		},
 	},
 	OutboundRules: []model.Rule{},
@@ -442,13 +476,14 @@ var policy_with_named_port_inherit = model.Policy{
 }
 
 var policy1_order20_with_selector_and_named_port_tcpport = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
 		{
 			Protocol:    &protoTCP,
 			SrcSelector: allSelector,
-			SrcPorts:    []numorstring.Port{numorstring.NamedPort("tcpport")},
+			SrcPorts:    []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 		},
 	},
 	OutboundRules: []model.Rule{
@@ -458,6 +493,7 @@ var policy1_order20_with_selector_and_named_port_tcpport = model.Policy{
 }
 
 var policy1_order20_with_selector_and_negated_named_port_tcpport = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -465,13 +501,14 @@ var policy1_order20_with_selector_and_negated_named_port_tcpport = model.Policy{
 			Protocol:       &protoTCP,
 			SrcSelector:    allSelector,
 			NotSrcSelector: "foo == 'bar'",
-			NotSrcPorts:    []numorstring.Port{numorstring.NamedPort("tcpport")},
+			NotSrcPorts:    []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 		},
 	},
 	Types: []string{"ingress"},
 }
 
 var policy1_order20_with_selector_and_negated_named_port_tcpport_dest = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -479,20 +516,21 @@ var policy1_order20_with_selector_and_negated_named_port_tcpport_dest = model.Po
 			Protocol:       &protoTCP,
 			DstSelector:    allSelector,
 			NotDstSelector: "foo == 'bar'",
-			NotDstPorts:    []numorstring.Port{numorstring.NamedPort("tcpport")},
+			NotDstPorts:    []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 		},
 	},
 	Types: []string{"ingress"},
 }
 
 var policy1_order20_with_selector_and_named_port_udpport = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
 		{
 			Protocol:    &protoUDP,
 			SrcSelector: allSelector,
-			SrcPorts:    []numorstring.Port{numorstring.NamedPort("udpport")},
+			SrcPorts:    []numorstring.Port{numorstring.Port{PortName: "udpport"}},
 		},
 	},
 	OutboundRules: []model.Rule{
@@ -502,24 +540,26 @@ var policy1_order20_with_selector_and_named_port_udpport = model.Policy{
 }
 
 var policy1_order20_with_named_port_mismatched_protocol = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
 		{
 			Protocol: &protoTCP,
-			SrcPorts: []numorstring.Port{numorstring.NamedPort("udpport")},
+			SrcPorts: []numorstring.Port{numorstring.Port{PortName: "udpport"}},
 		},
 	},
 	OutboundRules: []model.Rule{
 		{
 			Protocol: &protoUDP,
-			SrcPorts: []numorstring.Port{numorstring.NamedPort("tcpport")},
+			SrcPorts: []numorstring.Port{numorstring.Port{PortName: "tcpport"}},
 		},
 	},
 	Types: []string{"ingress", "egress"},
 }
 
 var policy1_order20_with_selector_and_named_port_tcpport2 = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -529,13 +569,14 @@ var policy1_order20_with_selector_and_named_port_tcpport2 = model.Policy{
 		{
 			Protocol:    &protoTCP,
 			SrcSelector: allSelector,
-			SrcPorts:    []numorstring.Port{numorstring.NamedPort("tcpport2")},
+			SrcPorts:    []numorstring.Port{numorstring.Port{PortName: "tcpport2"}},
 		},
 	},
 	Types: []string{"ingress", "egress"},
 }
 
 var policy1_order20_ingress_only = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -545,6 +586,7 @@ var policy1_order20_ingress_only = model.Policy{
 }
 
 var policy1_order20_egress_only = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	OutboundRules: []model.Rule{
@@ -554,6 +596,7 @@ var policy1_order20_egress_only = model.Policy{
 }
 
 var policy1_order20_untracked = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -566,6 +609,7 @@ var policy1_order20_untracked = model.Policy{
 }
 
 var policy1_order20_pre_dnat = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -575,6 +619,7 @@ var policy1_order20_pre_dnat = model.Policy{
 }
 
 var policy1_order20_http_match = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -583,6 +628,7 @@ var policy1_order20_http_match = model.Policy{
 }
 
 var policy1_order20_src_service_account = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	InboundRules: []model.Rule{
@@ -591,6 +637,7 @@ var policy1_order20_src_service_account = model.Policy{
 }
 
 var policy1_order20_dst_service_account = model.Policy{
+	Tier:     "default",
 	Order:    &order20,
 	Selector: "a == 'a'",
 	OutboundRules: []model.Rule{
@@ -910,10 +957,10 @@ var remoteIPAMBlockWithBorrows = model.AllocationBlock{
 	Unallocated: []int{3, 4, 5, 6, 7},
 	Attributes: []model.AllocationAttribute{
 		{},
-		{AttrSecondary: map[string]string{
+		{ActiveOwnerAttrs: map[string]string{
 			model.IPAMBlockAttributeNode: remoteHostname,
 		}},
-		{AttrSecondary: map[string]string{
+		{ActiveOwnerAttrs: map[string]string{
 			model.IPAMBlockAttributeNode: remoteHostname2,
 		}},
 	},
@@ -935,10 +982,10 @@ var remoteIPAMBlockWithBorrowsSwitched = model.AllocationBlock{
 	Unallocated: []int{3, 4, 5, 6, 7},
 	Attributes: []model.AllocationAttribute{
 		{},
-		{AttrSecondary: map[string]string{
+		{ActiveOwnerAttrs: map[string]string{
 			model.IPAMBlockAttributeNode: remoteHostname2,
 		}},
-		{AttrSecondary: map[string]string{
+		{ActiveOwnerAttrs: map[string]string{
 			model.IPAMBlockAttributeNode: remoteHostname,
 		}},
 	},
@@ -963,12 +1010,12 @@ var localIPAMBlockWithBorrows = model.AllocationBlock{
 		{},
 
 		// 10.0.0.1 - assigned locally.
-		{AttrSecondary: map[string]string{
+		{ActiveOwnerAttrs: map[string]string{
 			model.IPAMBlockAttributeNode: localHostname,
 		}},
 
 		// 10.0.0.2 - assigned to remoteHostname.
-		{AttrSecondary: map[string]string{
+		{ActiveOwnerAttrs: map[string]string{
 			model.IPAMBlockAttributeNode: remoteHostname,
 		}},
 	},
@@ -1028,9 +1075,10 @@ var endpointSlice2NewIPs2 = discovery.EndpointSlice{
 }
 
 var (
-	servicePolicyKey  = model.PolicyKey{Name: "svc-policy"}
-	servicePolicyKey2 = model.PolicyKey{Name: "svc-policy2"}
+	servicePolicyKey  = model.PolicyKey{Name: "svc-policy", Kind: v3.KindGlobalNetworkPolicy}
+	servicePolicyKey2 = model.PolicyKey{Name: "svc-policy2", Kind: v3.KindGlobalNetworkPolicy}
 	servicePolicy     = model.Policy{
+		Tier:      "default",
 		Namespace: "default",
 		OutboundRules: []model.Rule{
 			{
@@ -1042,27 +1090,28 @@ var (
 		Types:    []string{"egress"},
 		Selector: "all()",
 	}
-)
 
-var servicePolicyNoPorts = model.Policy{
-	Namespace: "default",
-	InboundRules: []model.Rule{
-		{
-			Action:              "Allow",
-			SrcService:          "svc",
-			SrcServiceNamespace: "default",
-			Protocol:            &protoTCP,
-			SrcPorts: []numorstring.Port{
-				{
-					MinPort: 80,
-					MaxPort: 80,
+	servicePolicyNoPorts = model.Policy{
+		Tier:      "default",
+		Namespace: "default",
+		InboundRules: []model.Rule{
+			{
+				Action:              "Allow",
+				SrcService:          "svc",
+				SrcServiceNamespace: "default",
+				Protocol:            &protoTCP,
+				SrcPorts: []numorstring.Port{
+					{
+						MinPort: 80,
+						MaxPort: 80,
+					},
 				},
 			},
 		},
-	},
-	Types:    []string{"ingress"},
-	Selector: "all()",
-}
+		Types:    []string{"ingress"},
+		Selector: "all()",
+	}
+)
 
 func intPtr(i int) *int {
 	return &i

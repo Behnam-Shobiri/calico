@@ -41,6 +41,8 @@ var _ = describe.CalicoDescribe(
 	describe.WithTeam(describe.Core),
 	describe.WithFeature("IPIP"),
 	describe.WithCategory(describe.Networking),
+	describe.RequiresNoEncap(),
+	describe.WithSerial(),
 	"IP-in-IP tests",
 	func() {
 		// Define variables common across all tests.
@@ -52,7 +54,7 @@ var _ = describe.CalicoDescribe(
 		var poolName string
 
 		// Create a new framework for the tests.
-		f := utils.NewDefaultFramework("bgp-export")
+		f := utils.NewDefaultFramework("ipip")
 
 		ginkgo.BeforeEach(func() {
 			if windows.ClusterIsWindows() {
@@ -67,9 +69,6 @@ var _ = describe.CalicoDescribe(
 			cli, err = client.New(f.ClientConfig())
 			Expect(err).NotTo(HaveOccurred())
 
-			// Ensure a clean starting environment before each test.
-			Expect(utils.CleanDatastore(cli)).ShouldNot(HaveOccurred())
-
 			// We need a minimum of two nodes for BGP peering tests.
 			utils.RequireNodeCount(f, 2)
 
@@ -83,7 +82,7 @@ var _ = describe.CalicoDescribe(
 			Expect(*installation.Spec.CalicoNetwork.BGP).To(Equal(v1.BGPEnabled), "BGP is not enabled in the cluster")
 
 			// Create an IP pool for the test.
-			poolName = conncheck.GenerateRandomName("ipip-pool")
+			poolName = utils.GenerateRandomName("ipip-pool")
 			pool := v3.NewIPPool()
 			pool.Name = poolName
 			pool.Spec.CIDR = "203.0.113.0/24"
@@ -143,12 +142,7 @@ var _ = describe.CalicoDescribe(
 			err = cli.Update(context.Background(), pool)
 			Expect(err).NotTo(HaveOccurred(), "Error updating IP pool to disable IPIP")
 
-			// Verify connectivity still works.
-			checker.ResetExpectations()
-			checker.ExpectSuccess(client1, server1.ClusterIPs()...)
-			checker.Execute()
-
-			// Eventually, the routes for the test's IP pool should no longer use tunl0.
+			// Wait for routes to converge before checking connectivity.
 			ginkgo.By("Verifying that node routes no longer use tunl0")
 			Eventually(func() error {
 				routes := getNodeRoutes(cli, "203.0.113")
@@ -161,7 +155,12 @@ var _ = describe.CalicoDescribe(
 					}
 				}
 				return nil
-			}, 10*time.Second, 1*time.Second).Should(Succeed(), "Routes for the test IP pool are still using tunl0")
+			}, 30*time.Second, 1*time.Second).Should(Succeed(), "Routes for the test IP pool are still using tunl0")
+
+			// Verify connectivity still works.
+			checker.ResetExpectations()
+			checker.ExpectSuccess(client1, server1.ClusterIPs()...)
+			checker.Execute()
 
 			// CrossSubnet.
 			ginkgo.By("Setting IPIP mode to CrossSubnet on the IP pool")
@@ -244,7 +243,7 @@ func getNodeRoutes(cli ctrlclient.Client, match string) []string {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Error querying routes from pod %s", p.Name)
 
 	matches := []string{}
-	for _, s := range strings.Split(out, "\n") {
+	for s := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(s, match) {
 			matches = append(matches, s)
 		}

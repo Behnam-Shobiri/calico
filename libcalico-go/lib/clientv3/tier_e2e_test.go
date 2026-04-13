@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2024-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,7 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
 	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
@@ -71,17 +70,6 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 	kcnpBaselineTierOrder := apiv3.KubeBaselineTierOrder
 	kcnpBaselineSpec := apiv3.TierSpec{
 		Order:         &kcnpBaselineTierOrder,
-		DefaultAction: &actionPass,
-	}
-	anpOrder := apiv3.AdminNetworkPolicyTierOrder
-	anpSpec := apiv3.TierSpec{
-		Order:         &anpOrder,
-		DefaultAction: &actionPass,
-	}
-
-	banpOrder := apiv3.BaselineAdminNetworkPolicyTierOrder
-	banpSpec := apiv3.TierSpec{
-		Order:         &banpOrder,
 		DefaultAction: &actionPass,
 	}
 
@@ -182,7 +170,7 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			}, options.SetOptions{})
 			Expect(res).To(BeNil())
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("default tier order must be 1e+06"))
+			Expect(outError.Error()).Should(ContainSubstring("default tier order must be 1000000"))
 
 			By("Cannot delete the default Tier")
 			_, outError = c.Tiers().Delete(ctx, defaultName, options.DeleteOptions{})
@@ -198,82 +186,57 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			defRes.Spec = spec1
 			_, outError = c.Tiers().Update(ctx, defRes, options.SetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("default tier order must be 1e+06"))
+			Expect(outError.Error()).Should(ContainSubstring("default tier order must be 1000000"))
 
-			By("Creating the adminnetworkpolicy tier with an invalid order")
-			res, outError = c.Tiers().Create(ctx, &apiv3.Tier{
-				ObjectMeta: metav1.ObjectMeta{Name: names.AdminNetworkPolicyTierName},
-				Spec:       spec1,
-			}, options.SetOptions{})
-			Expect(res).To(BeNil())
-			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("adminnetworkpolicy tier order must be 1000"))
-
-			By("Cannot delete the adminnetworkpolicy Tier")
-			_, outError = c.Tiers().Delete(ctx, names.AdminNetworkPolicyTierName, options.DeleteOptions{})
-			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("operation Delete is not supported on adminnetworkpolicy: Cannot delete adminnetworkpolicy tier"))
-
-			By("Getting adminnetworkpolicy Tier")
-			defRes, outError = c.Tiers().Get(ctx, names.AdminNetworkPolicyTierName, options.GetOptions{})
-			Expect(outError).NotTo(HaveOccurred())
-			Expect(defRes).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.AdminNetworkPolicyTierName, anpSpec))
-
-			By("Cannot update the adminnetworkpolicy Tier")
-			defRes.Spec = spec1
-			_, outError = c.Tiers().Update(ctx, defRes, options.SetOptions{})
-			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("adminnetworkpolicy tier order must be 1000"))
-
-			By("Creating the admin tier with an invalid order")
+			By("Creating the kube-admin tier with an invalid order")
 			res, outError = c.Tiers().Create(ctx, &apiv3.Tier{
 				ObjectMeta: metav1.ObjectMeta{Name: names.KubeAdminTierName},
 				Spec:       spec1,
 			}, options.SetOptions{})
 			Expect(res).To(BeNil())
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("admin tier order must be 1000"))
+			Expect(outError.Error()).Should(ContainSubstring("kube-admin tier order must be 1000"))
 
-			By("Cannot delete the admin Tier")
+			By("Cannot delete the kube-admin Tier")
 			_, outError = c.Tiers().Delete(ctx, names.KubeAdminTierName, options.DeleteOptions{})
 			Expect(outError).To(HaveOccurred())
 			Expect(outError.Error()).To(Equal("operation Delete is not supported on kube-admin: Cannot delete kube-admin tier"))
 
-			By("Getting admin Tier")
+			By("Getting kube-admin Tier")
 			defRes, outError = c.Tiers().Get(ctx, names.KubeAdminTierName, options.GetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
 			Expect(defRes).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.KubeAdminTierName, kcnpAdminSpec))
 
-			By("Cannot update the admin Tier")
+			By("Cannot update the kube-admin Tier")
 			defRes.Spec = spec1
 			_, outError = c.Tiers().Update(ctx, defRes, options.SetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("admin tier order must be 1000"))
+			Expect(outError.Error()).Should(ContainSubstring("kube-admin tier order must be 1000"))
 
-			By("Creating the baseline tier with an invalid order")
+			By("Creating the kube-baseline tier with an invalid order")
 			res, outError = c.Tiers().Create(ctx, &apiv3.Tier{
 				ObjectMeta: metav1.ObjectMeta{Name: names.KubeBaselineTierName},
 				Spec:       spec1,
 			}, options.SetOptions{})
 			Expect(res).To(BeNil())
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("baseline tier order must be 1e+07"))
+			Expect(outError.Error()).Should(ContainSubstring("kube-baseline tier order must be 10000000"))
 
-			By("Cannot delete the baseline Tier")
+			By("Cannot delete the kube-baseline Tier")
 			_, outError = c.Tiers().Delete(ctx, names.KubeBaselineTierName, options.DeleteOptions{})
 			Expect(outError).To(HaveOccurred())
 			Expect(outError.Error()).To(Equal("operation Delete is not supported on kube-baseline: Cannot delete kube-baseline tier"))
 
-			By("Getting baseline Tier")
+			By("Getting kube-baseline Tier")
 			defRes, outError = c.Tiers().Get(ctx, names.KubeBaselineTierName, options.GetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
 			Expect(defRes).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.KubeBaselineTierName, kcnpBaselineSpec))
 
-			By("Cannot update the baseline Tier")
+			By("Cannot update the kube-baseline Tier")
 			defRes.Spec = spec1
 			_, outError = c.Tiers().Update(ctx, defRes, options.SetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).Should(ContainSubstring("baseline tier order must be 1e+07"))
+			Expect(outError.Error()).Should(ContainSubstring("kube-baseline tier order must be 10000000"))
 
 			By("Updating the Tier before it is created")
 			res, outError = c.Tiers().Update(ctx, &apiv3.Tier{
@@ -337,12 +300,10 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			checkAndFilterDefaultTiers := func(outList *apiv3.TierList) []apiv3.Tier {
 				// Tiers are returned in name order, and the default ones happen
 				// to sort first in these tests.
-				Expect(&outList.Items[0]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.AdminNetworkPolicyTierName, anpSpec))
-				Expect(&outList.Items[1]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.BaselineAdminNetworkPolicyTierName, banpSpec))
-				Expect(&outList.Items[2]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, defaultName, defaultSpec))
-				Expect(&outList.Items[3]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.KubeAdminTierName, kcnpAdminSpec))
-				Expect(&outList.Items[4]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.KubeBaselineTierName, kcnpBaselineSpec))
-				return outList.Items[5:]
+				Expect(&outList.Items[0]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, defaultName, defaultSpec))
+				Expect(&outList.Items[1]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.KubeAdminTierName, kcnpAdminSpec))
+				Expect(&outList.Items[2]).To(MatchResource(apiv3.KindTier, testutils.ExpectNoNamespace, names.KubeBaselineTierName, kcnpBaselineSpec))
+				return outList.Items[3:]
 			}
 			outList, outError := c.Tiers().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
@@ -466,7 +427,6 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			dgnp, outError := c.GlobalNetworkPolicies().Delete(ctx, gnpName1, options.DeleteOptions{ResourceVersion: rv_gnp})
 			Expect(outError).NotTo(HaveOccurred())
 			Expect(dgnp).To(MatchResource(apiv3.KindGlobalNetworkPolicy, testutils.ExpectNoNamespace, gnpName1, gnpSpec1))
-			time.Sleep(1 * time.Second)
 
 			By("Deleting Tier (name1) with the new resource version")
 			// Make sure that policies on other tiers are not associated with other tiers
@@ -487,19 +447,18 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			dgnp, outError = c.GlobalNetworkPolicies().Delete(ctx, gnpName2, options.DeleteOptions{ResourceVersion: rv_gnp2})
 			Expect(outError).NotTo(HaveOccurred())
 			Expect(dgnp).To(MatchResource(apiv3.KindGlobalNetworkPolicy, testutils.ExpectNoNamespace, gnpName2, gnpSpec2))
-			time.Sleep(1 * time.Second)
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Updating Tier name2 with a 2s TTL and waiting for the entry to be deleted")
 				_, outError = c.Tiers().Update(ctx, res2, options.SetOptions{TTL: 2 * time.Second})
 				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(1 * time.Second)
-				_, outError = c.Tiers().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(2 * time.Second)
-				_, outError = c.Tiers().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(ContainSubstring("resource does not exist: Tier(" + name2 + ") with error:"))
+				Eventually(func() string {
+					_, err := c.Tiers().Get(ctx, name2, options.GetOptions{})
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}, 5*time.Second, 200*time.Millisecond).Should(ContainSubstring("resource does not exist: Tier(" + name2 + ") with error:"))
 
 				By("Creating Tier name2 with a 2s TTL and waiting for the entry to be deleted")
 				_, outError = c.Tiers().Create(ctx, &apiv3.Tier{
@@ -507,13 +466,13 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 					Spec:       spec2,
 				}, options.SetOptions{TTL: 2 * time.Second})
 				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(1 * time.Second)
-				_, outError = c.Tiers().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).NotTo(HaveOccurred())
-				time.Sleep(2 * time.Second)
-				_, outError = c.Tiers().Get(ctx, name2, options.GetOptions{})
-				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(ContainSubstring("resource does not exist: Tier(" + name2 + ") with error:"))
+				Eventually(func() string {
+					_, err := c.Tiers().Get(ctx, name2, options.GetOptions{})
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}, 5*time.Second, 200*time.Millisecond).Should(ContainSubstring("resource does not exist: Tier(" + name2 + ") with error:"))
 			}
 
 			if config.Spec.DatastoreType == apiconfig.Kubernetes {
@@ -528,7 +487,7 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			Expect(outError).To(HaveOccurred())
 			Expect(outError.Error()).To(ContainSubstring("resource does not exist: Tier(" + name2 + ") with error:"))
 
-			By("Listing all Tiers and expecting only the default and adminnetworkpolicy tiers")
+			By("Listing all Tiers and expecting only the default, kube-admin and kube-baseline tiers")
 			outList, outError = c.Tiers().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
 			nonDefaultTiers = checkAndFilterDefaultTiers(outList)
@@ -589,7 +548,6 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			By("Deleting res1")
 			_, err = c.Tiers().Delete(ctx, name1, options.DeleteOptions{})
 			Expect(err).NotTo(HaveOccurred())
-			time.Sleep(1 * time.Second)
 
 			By("Checking for two events, create res2 and delete re1")
 			testWatcher1.ExpectEvents(apiv3.KindTier, []watch.Event{
@@ -702,7 +660,7 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 
 			By("Cleaning the datastore and expecting deletion events for each configured resource (tests prefix deletes results in individual events for each key)")
 			Expect(be.Clean()).NotTo(HaveOccurred())
-			testWatcher4.ExpectEvents(apiv3.KindTier, []watch.Event{
+			testWatcher4.ExpectEventsAnyOrder(apiv3.KindTier, []watch.Event{
 				{
 					Type:     watch.Deleted,
 					Previous: outRes1,
@@ -915,6 +873,69 @@ var _ = testutils.E2eDatastoreDescribe("Tier tests", testutils.DatastoreAll, fun
 			By("Attempting to delete tier-1 (expecting success)")
 			_, err = c.Tiers().Delete(ctx, "knp", options.DeleteOptions{ResourceVersion: tier.ResourceVersion})
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Describe("Tier UpdateStatus functionality", func() {
+		It("should set and preserve status across spec updates", func() {
+			c, err := clientv3.New(config)
+			Expect(err).NotTo(HaveOccurred())
+
+			be, err := backend.NewClient(config)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(be.Clean()).NotTo(HaveOccurred())
+
+			By("Creating a tier")
+			order := 100.0
+			tier, err := c.Tiers().Create(ctx, &apiv3.Tier{
+				ObjectMeta: metav1.ObjectMeta{Name: "status-test"},
+				Spec: apiv3.TierSpec{
+					Order:         &order,
+					DefaultAction: &actionPass,
+				},
+			}, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tier.Status.Conditions).To(BeEmpty())
+
+			By("Setting status via UpdateStatus")
+			tier.Status = apiv3.TierStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Ready",
+						Status:             metav1.ConditionTrue,
+						Reason:             "TierReady",
+						Message:            "Tier is ready",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+			tier, err = c.Tiers().UpdateStatus(ctx, tier, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tier.Status.Conditions).To(HaveLen(1))
+			Expect(tier.Status.Conditions[0].Type).To(Equal("Ready"))
+
+			By("Getting the tier and verifying status is present")
+			tier, err = c.Tiers().Get(ctx, "status-test", options.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tier.Status.Conditions).To(HaveLen(1))
+			Expect(tier.Status.Conditions[0].Type).To(Equal("Ready"))
+
+			By("Updating the tier spec and verifying status is preserved")
+			newOrder := 200.0
+			tier.Spec.Order = &newOrder
+			tier, err = c.Tiers().Update(ctx, tier, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Getting the tier and verifying status is still present after spec update")
+			tier, err = c.Tiers().Get(ctx, "status-test", options.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(*tier.Spec.Order).To(Equal(newOrder))
+			Expect(tier.Status.Conditions).To(HaveLen(1))
+			Expect(tier.Status.Conditions[0].Type).To(Equal("Ready"))
+
+			By("Cleaning up")
+			_, err = c.Tiers().Delete(ctx, "status-test", options.DeleteOptions{})
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 })

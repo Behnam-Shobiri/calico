@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,11 +16,11 @@ package loadbalancer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	v1 "k8s.io/api/core/v1"
@@ -33,11 +33,10 @@ import (
 	"github.com/projectcalico/calico/kube-controllers/tests/testutils"
 	"github.com/projectcalico/calico/libcalico-go/lib/apiconfig"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
-	"github.com/projectcalico/calico/libcalico-go/lib/json"
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 )
 
-var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
+var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", Ordered, ContinueOnFailure, func() {
 	var (
 		etcd                   *containers.Container
 		loadbalancercontroller *containers.Container
@@ -45,6 +44,8 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 		calicoClient           client.Interface
 		k8sClient              *kubernetes.Clientset
 		controllerManager      *containers.Container
+		removeKubeconfig       func()
+		kconfigfile            string
 	)
 
 	const testNamespace = "test-loadbalancer-ns"
@@ -151,7 +152,7 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 		},
 	}
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		// Run etcd.
 		etcd = testutils.RunEtcd()
 		calicoClient = testutils.GetCalicoClient(apiconfig.EtcdV3, etcd.IP, "")
@@ -160,19 +161,12 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 		apiserver = testutils.RunK8sApiserver(etcd.IP)
 
 		// Write out a kubeconfig file
-		kconfigfile, err := os.CreateTemp("", "ginkgo-loadbalancercontroller")
-		Expect(err).NotTo(HaveOccurred())
-		defer func() { _ = os.Remove(kconfigfile.Name()) }()
-		data := testutils.BuildKubeconfig(apiserver.IP)
-		_, err = kconfigfile.Write([]byte(data))
-		Expect(err).NotTo(HaveOccurred())
+		kconfigfile, removeKubeconfig = testutils.BuildKubeconfig(apiserver.IP)
 
-		// Make the kubeconfig readable by the container.
-		Expect(kconfigfile.Chmod(os.ModePerm)).NotTo(HaveOccurred())
+		loadbalancercontroller = testutils.RunLoadBalancerController(apiconfig.EtcdV3, etcd.IP, kconfigfile, "")
 
-		loadbalancercontroller = testutils.RunLoadBalancerController(apiconfig.EtcdV3, etcd.IP, kconfigfile.Name(), "")
-
-		k8sClient, err = testutils.GetK8sClient(kconfigfile.Name())
+		var err error
+		k8sClient, err = testutils.GetK8sClient(kconfigfile)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wait for the apiserver to be available.
@@ -189,12 +183,17 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 		controllerManager = testutils.RunK8sControllerManager(apiserver.IP)
 	})
 
-	AfterEach(func() {
+	AfterAll(func() {
 		_ = calicoClient.Close()
 		controllerManager.Stop()
 		loadbalancercontroller.Stop()
 		apiserver.Stop()
 		etcd.Stop()
+		removeKubeconfig()
+	})
+
+	AfterEach(func() {
+		testutils.CleanupAllResources(context.Background(), k8sClient, calicoClient, nil, testutils.CleanupOptions{})
 	})
 
 	Context("Service LoadBalancer FV tests - LoadBalancer AllServices mode", func() {
@@ -304,8 +303,8 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 			Expect(serviceSpecific.Status.LoadBalancer.Ingress[0].IP).Should(Equal(v4poolManualSpecifcIP))
 
 			// Update the service type to NodePort, LoadBalancer controller should release the IP
-			svcPatch := map[string]interface{}{}
-			spec := map[string]interface{}{}
+			svcPatch := map[string]any{}
+			spec := map[string]any{}
 			svcPatch["spec"] = spec
 			spec["type"] = v1.ServiceTypeNodePort
 			patch, err := json.Marshal(svcPatch)
@@ -396,6 +395,9 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 
 			Eventually(func() string {
 				service, _ := k8sClient.CoreV1().Services(testNamespace).Get(context.Background(), basicService.Name, metav1.GetOptions{})
+				if service == nil || len(service.Status.LoadBalancer.Ingress) == 0 {
+					return ""
+				}
 				return service.Status.LoadBalancer.Ingress[0].IP
 			}, time.Second*15, 500*time.Millisecond).Should(Equal(v4poolManualIP))
 		})
@@ -421,6 +423,9 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 
 			Eventually(func() string {
 				service, _ := k8sClient.CoreV1().Services(testNamespace).Get(context.Background(), basicService.Name, metav1.GetOptions{})
+				if service == nil || len(service.Status.LoadBalancer.Ingress) == 0 {
+					return ""
+				}
 				return service.Status.LoadBalancer.Ingress[0].IP
 			}, time.Second*15, 500*time.Millisecond).Should(Equal(specificIpFromAutomaticPool))
 		})
@@ -449,16 +454,19 @@ var _ = Describe("Calico loadbalancer controller FV tests (etcd mode)", func() {
 				return service.Status.LoadBalancer.Ingress
 			}, time.Second*15, 500*time.Millisecond).Should(Not(BeEmpty()))
 
-			service, err = k8sClient.CoreV1().Services(testNamespace).Get(context.Background(), serviceIpv4PoolSpecified.Name, metav1.GetOptions{})
-			Expect(err).NotTo(HaveOccurred())
-
-			// Update the service to have the same IP as the service we have created above
-			service.Annotations = map[string]string{
-				"projectcalico.org/loadBalancerIPs": fmt.Sprintf("[\"%s\"]", specificIpFromAutomaticPool),
-			}
-
-			_, err = k8sClient.CoreV1().Services(testNamespace).Update(context.Background(), service, metav1.UpdateOptions{})
-			Expect(err).NotTo(HaveOccurred())
+			// Update the service to have the same IP as the service we have created above.
+			// Retry on conflict since the loadbalancer controller may concurrently update the service.
+			Eventually(func() error {
+				svc, err := k8sClient.CoreV1().Services(testNamespace).Get(context.Background(), serviceIpv4PoolSpecified.Name, metav1.GetOptions{})
+				if err != nil {
+					return err
+				}
+				svc.Annotations = map[string]string{
+					"projectcalico.org/loadBalancerIPs": fmt.Sprintf("[\"%s\"]", specificIpFromAutomaticPool),
+				}
+				_, err = k8sClient.CoreV1().Services(testNamespace).Update(context.Background(), svc, metav1.UpdateOptions{})
+				return err
+			}, time.Second*5, 500*time.Millisecond).Should(Succeed())
 
 			// The service ingress should be empty
 			Eventually(func() []v1.LoadBalancerIngress {

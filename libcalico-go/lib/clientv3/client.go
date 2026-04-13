@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@ import (
 	"github.com/projectcalico/calico/libcalico-go/lib/net"
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
+	validator "github.com/projectcalico/calico/libcalico-go/lib/validator/v3"
 )
 
 // client implements the client.Interface.
@@ -56,6 +57,15 @@ func New(config apiconfig.CalicoAPIConfig) (Interface, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Enable in-process CRD validation (CEL rules, OpenAPI constraints,
+	// schema defaulting) for etcd mode. In KDD mode the kube-apiserver
+	// handles this on admission, so we skip it to avoid the expensive
+	// CEL compilation cost.
+	if config.Spec.DatastoreType == apiconfig.EtcdV3 {
+		validator.SetCRDValidationEnabled(true)
+	}
+
 	return client{
 		config:    config,
 		backend:   be,
@@ -65,7 +75,6 @@ func New(config apiconfig.CalicoAPIConfig) (Interface, error) {
 
 // NewFromEnv loads the config from ENV variables and returns a connected client.
 func NewFromEnv() (Interface, error) {
-
 	config, err := apiconfig.LoadClientConfigFromEnvironment()
 	if err != nil {
 		return nil, err
@@ -181,13 +190,18 @@ func (c client) CalicoNodeStatus() CalicoNodeStatusInterface {
 }
 
 // IPAMConfig returns an interface for managing the IPAMConfig resource.
-func (c client) IPAMConfig() IPAMConfigInterface {
-	return IPAMConfigs{client: c}
+func (c client) IPAMConfiguration() IPAMConfigurationInterface {
+	return IPAMConfigurations{client: c}
 }
 
 // BlockAffinity returns an interface for viewing the IPAM block affinity resources.
 func (c client) BlockAffinities() BlockAffinityInterface {
 	return blockAffinities{client: c}
+}
+
+// LiveMigrations returns an interface for managing LiveMigration resources.
+func (c client) LiveMigrations() LiveMigrationInterface {
+	return liveMigrations{client: c}
 }
 
 // BGPFilter returns an interface for managing the BGPFilter resource.
@@ -208,6 +222,17 @@ func filterIPPool(pool *v3.IPPool, ipVersion int) bool {
 		log.Debugf("Skipping disabled IP pool (%s)", pool.Name)
 		return false
 	}
+
+	if pool.Status != nil {
+		// Skip any pools that have been marked as unavailable for allocations by the IP pool controller in kube-controllers.
+		for _, condition := range pool.Status.Conditions {
+			if condition.Type == v3.IPPoolConditionAllocatable && condition.Status == metav1.ConditionFalse {
+				log.Debugf("Skipping IP pool (%s) with condition Allocatable=false", pool.Name)
+				return false
+			}
+		}
+	}
+
 	if _, cidr, err := net.ParseCIDR(pool.Spec.CIDR); err == nil && cidr.Version() == ipVersion {
 		log.Debugf("Adding pool (%s) to the IPPool list", cidr.String())
 		return true
@@ -273,18 +298,6 @@ func (c client) EnsureInitialized(ctx context.Context, calicoVersion, clusterTyp
 	err := c.ensureTierExists(ctx, names.DefaultTierName, v3.Deny, v3.DefaultTierOrder)
 	if err != nil {
 		log.WithError(err).Info("Unable to initialize default Tier")
-		errs = append(errs, err)
-	}
-
-	err = c.ensureTierExists(ctx, names.AdminNetworkPolicyTierName, v3.Pass, v3.AdminNetworkPolicyTierOrder)
-	if err != nil {
-		log.WithError(err).Info("Unable to initialize adminnetworkpolicy Tier")
-		errs = append(errs, err)
-	}
-
-	err = c.ensureTierExists(ctx, names.BaselineAdminNetworkPolicyTierName, v3.Pass, v3.BaselineAdminNetworkPolicyTierOrder)
-	if err != nil {
-		log.WithError(err).Info("Unable to initialize baselineadminnetworkpolicy Tier")
 		errs = append(errs, err)
 	}
 

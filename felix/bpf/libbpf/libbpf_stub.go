@@ -29,6 +29,9 @@ type Map struct {
 type Link struct {
 }
 
+type Program struct {
+}
+
 func (m *Map) Name() string {
 	panic("LIBBPF syscall stub")
 }
@@ -57,6 +60,10 @@ func (o *Obj) Load() error {
 	panic("LIBBPF syscall stub")
 }
 
+func (o *Obj) SetProgramAutoload(progName string, autoload bool) {
+	panic("LIBBPF syscall stub")
+}
+
 func (o *Obj) FirstMap() (*Map, error) {
 	panic("LIBBPF syscall stub")
 }
@@ -70,6 +77,18 @@ func (o *Obj) SetAttachType(progName string, attachType uint32) error {
 }
 
 func (m *Map) NextMap() (*Map, error) {
+	panic("LIBBPF syscall stub")
+}
+
+func (p *Program) NextProgram() (*Program, error) {
+	panic("LIBBPF syscall stub")
+}
+
+func (o *Obj) FirstProgram() (*Program, error) {
+	panic("LIBBPF syscall stub")
+}
+
+func (p *Program) Name() string {
 	panic("LIBBPF syscall stub")
 }
 
@@ -98,10 +117,6 @@ func GetXDPProgramID(ifName string) (int, error) {
 }
 
 func (o *Obj) AttachCGroup(_, _ string) (*Link, error) {
-	panic("LIBBPF syscall stub")
-}
-
-func (o *Obj) AttachCGroupLegacy(_, _ string) error {
 	panic("LIBBPF syscall stub")
 }
 
@@ -157,10 +172,6 @@ func (l *Link) Detach() error {
 	panic("LIBBPF syscall stub")
 }
 
-func DetachCTLBProgramsLegacy(_ bool, _ string) error {
-	panic("LIBBPF syscall stub")
-}
-
 func (o *Obj) UpdateJumpMap(mapName, progName string, mapIndex int) error {
 	panic("LIBBPF syscall stub")
 }
@@ -174,18 +185,21 @@ func (m *Map) IsMapInternal() bool {
 }
 
 const (
-	GlobalsRPFOptionEnabled            uint32 = 16
-	GlobalsRPFOptionStrict             uint32 = 32
-	GlobalsNoDSRCidrs                  uint32 = 12345
-	GlobalsLoUDPOnly                   uint32 = 12345
-	GlobalsRedirectPeer                uint32 = 12345
-	GlobalsFlowLogsEnabled             uint32 = 12345
-	GlobalsNATOutgoingExcludeHosts     uint32 = 12345
-	GlobalsSkipEgressRedirect          uint32 = 12345
-	GlobalsIngressPacketRateConfigured uint32 = 12345
-	GlobalsEgressPacketRateConfigured  uint32 = 12345
-	AttachTypeTcxIngress               uint32 = 12345
-	AttachTypeTcxEgress                uint32 = 12345
+	GlobalsRPFOptionEnabled              uint32 = 16
+	GlobalsRPFOptionStrict               uint32 = 32
+	GlobalsNoDSRCidrs                    uint32 = 12345
+	GlobalsLoUDPOnly                     uint32 = 12345
+	GlobalsRedirectPeer                  uint32 = 12345
+	GlobalsFlowLogsEnabled               uint32 = 12345
+	GlobalsNATOutgoingExcludeHosts       uint32 = 12345
+	GlobalsSkipEgressRedirect            uint32 = 12345
+	GlobalsIngressPacketRateConfigured   uint32 = 12345
+	GlobalsEgressPacketRateConfigured    uint32 = 12345
+	GlobalsWorkloadSrcSpoofingConfigured uint32 = 12345
+	GlobalsUDPGSOLinearize               uint32 = 12345
+	AttachTypeTcxIngress                 uint32 = 12345
+	AttachTypeTcxEgress                  uint32 = 12345
+	AttachTypeXDP                        uint32 = 12345
 )
 
 func (m *Map) SetSize(size int) error {

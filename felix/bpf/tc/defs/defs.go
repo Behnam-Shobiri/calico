@@ -1,4 +1,4 @@
-// Copyright (c) 2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2021-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,6 +57,7 @@ const (
 	ProgIndexNewFlow
 	ProgIndexIPFrag
 	ProgIndexMaglev
+	ProgIndexTCPRst
 	ProgIndexMainDebug
 	ProgIndexPolicyDebug
 	ProgIndexAllowedDebug
@@ -67,6 +68,7 @@ const (
 	ProgIndexNewFlowDebug
 	ProgIndexIPFragDebug
 	ProgIndexMaglevDebug
+	ProgIndexTCPRstDebug
 	ProgIndexEndDebug
 	ProgIndexEnd
 
@@ -92,6 +94,7 @@ var ProgramNames = []string{
 	"calico_tc_skb_new_flow_entrypoint",
 	"calico_tc_skb_ipv4_frag",
 	"calico_tc_maglev",
+	"calico_tc_skb_send_tcp_rst",
 	/* ipv4 - debug */
 	"calico_tc_main",
 	"calico_tc_norm_pol_tail",
@@ -103,6 +106,7 @@ var ProgramNames = []string{
 	"calico_tc_skb_new_flow_entrypoint",
 	"calico_tc_skb_ipv4_frag",
 	"calico_tc_maglev",
+	"calico_tc_skb_send_tcp_rst",
 	/* ipv6 */
 	"calico_tc_main",
 	"calico_tc_norm_pol_tail",
@@ -114,6 +118,7 @@ var ProgramNames = []string{
 	"calico_tc_skb_new_flow_entrypoint",
 	"",
 	"calico_tc_maglev",
+	"calico_tc_skb_send_tcp_rst",
 	/* ipv6 - debug */
 	"calico_tc_main",
 	"calico_tc_norm_pol_tail",
@@ -125,6 +130,7 @@ var ProgramNames = []string{
 	"calico_tc_skb_new_flow_entrypoint",
 	"",
 	"calico_tc_maglev",
+	"calico_tc_skb_send_tcp_rst",
 }
 
 type ToOrFromEp string
@@ -150,7 +156,7 @@ func SectionName(endpointType EndpointType, fromOrTo ToOrFromEp) string {
 	return fmt.Sprintf("calico_%s_%s_ep", fromOrTo, endpointType)
 }
 
-func ProgFilename(ipVer int, epType EndpointType, toOrFrom ToOrFromEp, epToHostDrop, dsr bool, logLevel string, btf bool) string {
+func ProgFilename(ipVer int, epType EndpointType, toOrFrom ToOrFromEp, epToHostDrop, dsr bool, logLevel string) string {
 	if epToHostDrop && (epType != EpTypeWorkload || toOrFrom == ToEp) {
 		// epToHostDrop only makes sense in the from-workload program.
 		logrus.Debug("Ignoring epToHostDrop, doesn't apply to this target")
@@ -186,16 +192,12 @@ func ProgFilename(ipVer int, epType EndpointType, toOrFrom ToOrFromEp, epToHostD
 	case EpTypeVXLAN:
 		epTypeShort = "vxlan"
 	}
-	corePart := ""
-	if btf {
-		corePart = "_co-re"
-	}
-
+	var versionPart string
 	if ipVer == 6 {
-		corePart += "_v6"
+		versionPart = "_v6"
 	}
 
 	oFileName := fmt.Sprintf("%v_%v_%s%s%v%s.o",
-		toOrFrom, epTypeShort, hostDropPart, dsrPart, logLevel, corePart)
+		toOrFrom, epTypeShort, hostDropPart, dsrPart, logLevel, versionPart)
 	return oFileName
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -71,10 +71,15 @@ type MatchCriteria interface {
 	NotICMPV6Type(t uint8) MatchCriteria
 	ICMPV6TypeAndCode(t, c uint8) MatchCriteria
 	NotICMPV6TypeAndCode(t, c uint8) MatchCriteria
+	Limit(r string, b uint16) MatchCriteria
 
 	// Only supported in nftables.
 	InInterfaceVMAP(mapname string) MatchCriteria
 	OutInterfaceVMAP(mapname string) MatchCriteria
+
+	// ARP family matches (only supported in nftables ARP table).
+	ARPOperation(op string) MatchCriteria
+	ARPSrcIP(ip string) MatchCriteria
 }
 
 type AddrType string

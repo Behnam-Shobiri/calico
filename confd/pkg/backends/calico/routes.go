@@ -31,12 +31,24 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/projectcalico/calico/confd/pkg/resource/template"
-	"github.com/projectcalico/calico/libcalico-go/lib/winutils"
 )
 
 const (
-	envAdvertiseClusterIPs = "CALICO_ADVERTISE_CLUSTER_IPS"
+	envAdvertiseClusterIPs    = "CALICO_ADVERTISE_CLUSTER_IPS"
+	endpointSliceServiceIndex = "svcKey"
 )
+
+func endpointSliceServiceIndexFunc(obj interface{}) ([]string, error) {
+	ep, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok {
+		return nil, nil
+	}
+	svcName, ok := ep.Labels[discoveryv1.LabelServiceName]
+	if !ok || svcName == "" {
+		return nil, nil
+	}
+	return []string{ep.Namespace + "/" + svcName}, nil
+}
 
 // routeGenerator defines the data fields
 // necessary for monitoring the services/endpoints resources for
@@ -52,8 +64,8 @@ type routeGenerator struct {
 	resyncKnownRoutesTrigger   chan struct{}
 }
 
-// NewRouteGenerator initializes a kube-api client and the informers
-func NewRouteGenerator(c *client) (rg *routeGenerator, err error) {
+// NewRouteGenerator initializes the route generator using the provided K8s client.
+func NewRouteGenerator(c *client, k8sClient kubernetes.Interface) (rg *routeGenerator, err error) {
 	// Determine the node name we'll use to check for local endpoints.
 	// This value should match the name of the node in the Kubernetes API.
 	// Prefer CALICO_K8S_NODE_REF, and fall back to the Calico node name.
@@ -63,7 +75,6 @@ func NewRouteGenerator(c *client) (rg *routeGenerator, err error) {
 	}
 	log.Debugf("Route generator configured to use node name %s", nodename)
 
-	// initialize empty route generator
 	rg = &routeGenerator{
 		client:                     c,
 		nodeName:                   nodename,
@@ -72,24 +83,8 @@ func NewRouteGenerator(c *client) (rg *routeGenerator, err error) {
 		resyncKnownRoutesTrigger:   make(chan struct{}, 1),
 	}
 
-	// set up k8s client
-	// attempt 1: KUBECONFIG env var
-	cfgFile := os.Getenv("KUBECONFIG")
-	cfg, err := winutils.BuildConfigFromFlags("", cfgFile)
-	if err != nil {
-		log.WithError(err).Info("KUBECONFIG environment variable not found, attempting in-cluster")
-		// attempt 2: in cluster config
-		if cfg, err = winutils.GetInClusterConfig(); err != nil {
-			return
-		}
-	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return
-	}
-
-	// set up services informer
-	svcWatcher := cache.NewListWatchFromClient(client.CoreV1().RESTClient(), "services", "", fields.Everything())
+	// Set up services informer.
+	svcWatcher := cache.NewListWatchFromClient(k8sClient.CoreV1().RESTClient(), "services", "", fields.Everything())
 	svcHandler := cache.ResourceEventHandlerFuncs{AddFunc: rg.onSvcAdd, UpdateFunc: rg.onSvcUpdate, DeleteFunc: rg.onSvcDelete}
 	rg.svcIndexer, rg.svcInformer = cache.NewInformerWithOptions(cache.InformerOptions{
 		ListerWatcher: svcWatcher,
@@ -99,15 +94,15 @@ func NewRouteGenerator(c *client) (rg *routeGenerator, err error) {
 		Indexers:      cache.Indexers{},
 	})
 
-	// set up endpoints informer
-	epWatcher := cache.NewListWatchFromClient(client.DiscoveryV1().RESTClient(), "endpointslices", "", fields.Everything())
+	// Set up endpoint slices informer.
+	epWatcher := cache.NewListWatchFromClient(k8sClient.DiscoveryV1().RESTClient(), "endpointslices", "", fields.Everything())
 	epHandler := cache.ResourceEventHandlerFuncs{AddFunc: rg.onEPAdd, UpdateFunc: rg.onEPUpdate, DeleteFunc: rg.onEPDelete}
 	rg.epIndexer, rg.epInformer = cache.NewInformerWithOptions(cache.InformerOptions{
 		ListerWatcher: epWatcher,
 		ObjectType:    &discoveryv1.EndpointSlice{},
 		ResyncPeriod:  0,
 		Handler:       epHandler,
-		Indexers:      cache.Indexers{},
+		Indexers:      cache.Indexers{endpointSliceServiceIndex: endpointSliceServiceIndexFunc},
 	})
 
 	return
@@ -177,24 +172,27 @@ func (rg *routeGenerator) getServiceForEndpoints(ep *discoveryv1.EndpointSlice) 
 
 // getEndpointsForService retrieves the corresponding ep for the given svc
 func (rg *routeGenerator) getEndpointsForService(svc *v1.Service) ([]*discoveryv1.EndpointSlice, string) {
-	var eps []*discoveryv1.EndpointSlice
-	for _, obj := range rg.epIndexer.List() {
-		ep, ok := obj.(*discoveryv1.EndpointSlice)
-		if !ok {
-			log.Warn("getEndpointsForService: failed to assert type to endpointslice, passing")
-			continue
-		}
-		if svcName, ok := ep.Labels[discoveryv1.LabelServiceName]; ok && svcName == svc.Name && ep.Namespace == svc.Namespace {
-			eps = append(eps, ep)
-		}
-	}
-
 	key, err := cache.MetaNamespaceKeyFunc(svc)
 	if err != nil {
 		log.WithField("svc", svc.Name).WithError(err).Warn("getEndpointsForService: error on retrieving key for service, passing")
 		return nil, ""
 	}
 
+	objs, err := rg.epIndexer.(cache.Indexer).ByIndex(endpointSliceServiceIndex, key)
+	if err != nil {
+		log.WithField("key", key).WithError(err).Error("getEndpointsForService: error reading endpointslice index")
+		return nil, key
+	}
+
+	var eps []*discoveryv1.EndpointSlice
+	for _, obj := range objs {
+		ep, ok := obj.(*discoveryv1.EndpointSlice)
+		if !ok {
+			log.Warn("getEndpointsForService: failed to assert type to endpointslice, passing")
+			continue
+		}
+		eps = append(eps, ep)
+	}
 	return eps, key
 }
 
@@ -378,6 +376,23 @@ func (rg *routeGenerator) isAllowedLoadBalancerIP(loadBalancerIP string) bool {
 	return false
 }
 
+// hasAnySingleLoadBalancerIP checks whether the service has any LoadBalancer IP
+// that matches a single-IP (/32 or /128) entry in serviceLoadBalancerIPs.
+// It checks both svc.Spec.LoadBalancerIP (deprecated but still used) and the
+// actual assigned IPs from svc.Status.LoadBalancer.Ingress, since IPs assigned
+// from a Calico IPPool only appear in status, not spec.
+func (rg *routeGenerator) hasAnySingleLoadBalancerIP(svc *v1.Service) bool {
+	if rg.isSingleLoadBalancerIP(svc.Spec.LoadBalancerIP) {
+		return true
+	}
+	for _, ingress := range svc.Status.LoadBalancer.Ingress {
+		if rg.isSingleLoadBalancerIP(ingress.IP) {
+			return true
+		}
+	}
+	return false
+}
+
 // isSingleLoadBalancerIP determines if the given IP is in the list of
 // allowed LoadBalancer CIDRs given in the default bgpconfiguration
 // and is a single IP entry (/32 for IPV4 or /128 for IPV6)
@@ -445,12 +460,7 @@ func addFullIPLength(items []string) []string {
 
 // contains returns true if items contains the target.
 func contains(items []string, target string) bool {
-	for _, item := range items {
-		if item == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(items, target)
 }
 
 // advertiseThisService returns true if this service should be advertised on this node,
@@ -481,7 +491,7 @@ func (rg *routeGenerator) advertiseThisService(svc *v1.Service, eps []*discovery
 	// - LoadBalancer with a single IP.
 	// - Any one of the externalIPs are a single IP.
 	if svc.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyTypeCluster {
-		if svc.Spec.Type == v1.ServiceTypeLoadBalancer && rg.isSingleLoadBalancerIP(svc.Spec.LoadBalancerIP) {
+		if svc.Spec.Type == v1.ServiceTypeLoadBalancer && rg.hasAnySingleLoadBalancerIP(svc) {
 			logc.Debug("Advertising load balancer of type cluster because of single IP definition")
 			return true
 		}
@@ -500,30 +510,31 @@ func (rg *routeGenerator) advertiseThisService(svc *v1.Service, eps []*discovery
 		return false
 	}
 
-	isIPv6 := func(ip string) bool { return strings.Contains(ip, ":") }
+	// Build a lookup table of IP families supported by the Service.
+	// Example: ["IPv4"], ["IPv6"], or ["IPv4","IPv6"] for dual-stack.
+	svcIPFamilies := make(map[string]struct{})
+	for _, fam := range svc.Spec.IPFamilies {
+		svcIPFamilies[string(fam)] = struct{}{}
+	}
 
-	svcIsIPv6 := isIPv6(svc.Spec.ClusterIP)
-
-	// Endpoint-based advertisement logic for both Cluster and Local services.
-	// For Cluster services: advertise if any endpoints exist (when aggregation is disabled).
-	// For Local services: advertise only if local endpoints exist.
 	for _, ep := range eps {
+		// We only consider EndpointSlices whose addressType matches one of the Service’s families.
+		epFamily := string(ep.AddressType)
+		// Skip EndpointSlices with incompatible address families.
+		if _, ok := svcIPFamilies[epFamily]; !ok {
+			continue
+		}
 		for _, subset := range ep.Endpoints {
 			// not interested in subset.NotReadyAddresses
-			for _, address := range subset.Addresses {
-				if isIPv6(address) != svcIsIPv6 {
-					continue
-				}
-				if svc.Spec.ExternalTrafficPolicy != v1.ServiceExternalTrafficPolicyTypeLocal {
-					// For Cluster services, advertise if we have any endpoints
-					logc.Debugf("Advertising cluster service")
+			if svc.Spec.ExternalTrafficPolicy != v1.ServiceExternalTrafficPolicyTypeLocal {
+				// For Cluster services, advertise if we have any endpoints
+				logc.Debugf("Advertising cluster service")
+				return true
+			} else {
+				// For Local services, only advertise if we have local endpoints
+				if subset.NodeName != nil && *subset.NodeName == rg.nodeName {
+					logc.Debugf("Advertising local service")
 					return true
-				} else {
-					// For Local services, only advertise if we have local endpoints
-					if subset.NodeName != nil && *subset.NodeName == rg.nodeName {
-						logc.Debugf("Advertising local service")
-						return true
-					}
 				}
 			}
 		}
@@ -534,7 +545,7 @@ func (rg *routeGenerator) advertiseThisService(svc *v1.Service, eps []*discovery
 
 // unsetRouteForSvc removes the route from the svcClusterRouteMap
 // but checks to see if it wasn't already deleted by its sibling resource
-func (rg *routeGenerator) unsetRouteForSvc(obj interface{}) {
+func (rg *routeGenerator) unsetRouteForSvc(obj any) {
 	// generate key
 	key, err := cache.MetaNamespaceKeyFunc(obj)
 	if err != nil {
@@ -604,7 +615,7 @@ func (rg *routeGenerator) withdrawRoutesForKey(key string, routes []string) {
 }
 
 // onSvcAdd is called when a k8s service is created
-func (rg *routeGenerator) onSvcAdd(obj interface{}) {
+func (rg *routeGenerator) onSvcAdd(obj any) {
 	svc, ok := obj.(*v1.Service)
 	if !ok {
 		log.Warn("onSvcAdd: failed to assert type to service, passing")
@@ -614,7 +625,7 @@ func (rg *routeGenerator) onSvcAdd(obj interface{}) {
 }
 
 // onSvcUpdate is called when a k8s service is updated
-func (rg *routeGenerator) onSvcUpdate(_, obj interface{}) {
+func (rg *routeGenerator) onSvcUpdate(_, obj any) {
 	svc, ok := obj.(*v1.Service)
 	if !ok {
 		log.Warn("onSvcUpdate: failed to assert type to service, passing")
@@ -624,12 +635,12 @@ func (rg *routeGenerator) onSvcUpdate(_, obj interface{}) {
 }
 
 // onSvcUpdate is called when a k8s service is deleted
-func (rg *routeGenerator) onSvcDelete(obj interface{}) {
+func (rg *routeGenerator) onSvcDelete(obj any) {
 	rg.unsetRouteForSvc(obj)
 }
 
 // onEPAdd is called when a k8s endpoint is created
-func (rg *routeGenerator) onEPAdd(obj interface{}) {
+func (rg *routeGenerator) onEPAdd(obj any) {
 	ep, ok := obj.(*discoveryv1.EndpointSlice)
 	if !ok {
 		log.Warn("onEPAdd: failed to assert type to endpoint, passing")
@@ -639,7 +650,7 @@ func (rg *routeGenerator) onEPAdd(obj interface{}) {
 }
 
 // onEPUpdate is called when a k8s endpoint is updated
-func (rg *routeGenerator) onEPUpdate(_, obj interface{}) {
+func (rg *routeGenerator) onEPUpdate(_, obj any) {
 	ep, ok := obj.(*discoveryv1.EndpointSlice)
 	if !ok {
 		log.Warn("onEPUpdate: failed to assert type to endpoints, passing")
@@ -649,7 +660,7 @@ func (rg *routeGenerator) onEPUpdate(_, obj interface{}) {
 }
 
 // onEPDelete is called when a k8s endpoint is deleted
-func (rg *routeGenerator) onEPDelete(obj interface{}) {
+func (rg *routeGenerator) onEPDelete(obj any) {
 	rg.unsetRouteForSvc(obj)
 }
 

@@ -84,7 +84,9 @@ func toProtoFilter(filters whiskerv1.Filters) *proto.Filter {
 		Protocols:        toProtoStringMatches(filters.Protocols, nil),
 		DestPorts:        toProtoPorts(filters.DestPorts),
 		Actions:          filters.Actions.AsProtos(),
+		PendingActions:   filters.PendingActions.AsProtos(),
 		Policies:         toProtoPolicyMatch(filters.Policies),
+		Reporter:         filters.Reporter.AsProto(),
 	}
 }
 
@@ -93,9 +95,9 @@ func toProtoPolicyMatch(policies []whiskerv1.PolicyMatch) []*proto.PolicyMatch {
 	for _, policy := range policies {
 		protos = append(protos, &proto.PolicyMatch{
 			Kind:      policy.Kind.AsProto(),
-			Tier:      toProtoStringMatch(policy.Tier).Value,
-			Name:      toProtoStringMatch(policy.Name).Value,
-			Namespace: toProtoStringMatch(policy.Namespace).Value,
+			Tier:      toProtoStringMatch(policy.Tier),
+			Name:      toProtoStringMatch(policy.Name),
+			Namespace: toProtoStringMatch(policy.Namespace),
 			Action:    policy.Action.AsProto(),
 		})
 	}

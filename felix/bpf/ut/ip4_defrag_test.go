@@ -21,6 +21,8 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	. "github.com/onsi/gomega"
+
+	mapsbpf "github.com/projectcalico/calico/felix/bpf/maps"
 )
 
 func TestIP4Defrag(t *testing.T) {
@@ -33,7 +35,7 @@ func TestIP4Defrag(t *testing.T) {
 
 	data := make([]byte, 2000)
 
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		data[i*2] = byte(uint16(i) >> 8)
 		data[i*2+1] = byte(uint16(i) & 0xff)
 	}
@@ -45,7 +47,7 @@ func TestIP4Defrag(t *testing.T) {
 	udp := *udpDefault
 	udp.Length = 8 + 2000
 
-	// compute ull packet
+	// compute full packet
 	payload := gopacket.Payload(data)
 	_ = udp.SetNetworkLayerForChecksum(&ip)
 
@@ -104,6 +106,8 @@ func TestIP4Defrag(t *testing.T) {
 
 	pktFullR := gopacket.NewPacket(pktFull.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
 
+	/* First fragment in-order */
+
 	skbMark = 0
 	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
 		bytes := pkt0.Bytes()
@@ -112,12 +116,54 @@ func TestIP4Defrag(t *testing.T) {
 		Expect(err).NotTo(HaveOccurred())
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
-		Expect(res.Retval).To(Equal(resTC_ACT_SHOT))
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
 	})
 
 	skbMark = 0
 	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
 		res, err := bpfrun(pkt1.Bytes())
+		Expect(err).NotTo(HaveOccurred())
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+	})
+
+	skbMark = 0
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pkt3.Bytes())
+		Expect(err).NotTo(HaveOccurred())
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+	})
+
+	skbMark = 0
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pkt2.Bytes())
+		Expect(err).NotTo(HaveOccurred())
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+	})
+
+	/* First fragment out-of-order */
+
+	cleanupMap(ipfragsFwdMap)
+
+	skbMark = 0
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		res, err := bpfrun(pkt1.Bytes())
+		Expect(err).NotTo(HaveOccurred())
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+		Expect(res.Retval).To(Equal(resTC_ACT_SHOT))
+	})
+
+	skbMark = 0
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		bytes := pkt0.Bytes()
+		copy(bytes[40:42], pktFull.Bytes()[40:42]) // patch in the udp csum for the entire packet
+		res, err := bpfrun(bytes)
 		Expect(err).NotTo(HaveOccurred())
 		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
 		fmt.Printf("pktR = %+v\n", pktR)
@@ -145,11 +191,43 @@ func TestIP4Defrag(t *testing.T) {
 		payloadL := pktR.ApplicationLayer()
 		data := payloadL.Payload()
 
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			Expect(data[i*2]).To(Equal(byte(uint16(i)>>8)), fmt.Sprintf("wrong at index %d", i*2))
 			Expect(data[i*2+1]).To(Equal(byte(uint16(i)&0xff)), fmt.Sprintf("wrong at index %d", i*2+1))
 		}
 
 		Expect(pktFull.Bytes()).To(Equal(res.dataOut))
 	})
+
+	/* First fragment only - sets timer, it needs to kick in */
+
+	cleanupMap(ipfragsFwdMap)
+
+	ipfragsFwdMapCount := func() int {
+		count := 0
+		_ = ipfragsFwdMap.Iter(func(key, value []byte) mapsbpf.IteratorAction {
+			count++
+			return mapsbpf.IterNone
+		})
+		return count
+	}
+
+	Expect(ipfragsFwdMapCount()).To(Equal(0))
+
+	skbMark = 0
+	runBpfTest(t, "calico_from_host_ep", nil, func(bpfrun bpfProgRunFn) {
+		bytes := pkt0.Bytes()
+		copy(bytes[40:42], pktFull.Bytes()[40:42]) // patch in the udp csum for the entire packet
+		res, err := bpfrun(bytes)
+		Expect(err).NotTo(HaveOccurred())
+		pktR := gopacket.NewPacket(res.dataOut, layers.LayerTypeEthernet, gopacket.Default)
+		fmt.Printf("pktR = %+v\n", pktR)
+		Expect(res.Retval).To(Equal(resTC_ACT_UNSPEC))
+	}, withIPFragTimeout(1))
+
+	Expect(ipfragsFwdMapCount()).To(Equal(1))
+
+	Eventually(func() int {
+		return ipfragsFwdMapCount()
+	}, "2s", "200ms").Should(Equal(0))
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017,2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017,2021-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@ const (
 	KindProfileList = "ProfileList"
 )
 
-// +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // ProfileList is a list of Profile objects.
@@ -37,25 +36,30 @@ type ProfileList struct {
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster
 
 type Profile struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
 
-	Spec ProfileSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	Spec ProfileSpec `json:"spec" protobuf:"bytes,2,opt,name=spec"`
 }
 
 // ProfileSpec contains the specification for a security Profile resource.
 type ProfileSpec struct {
 	// The ordered set of ingress rules.  Each rule contains a set of packet match criteria and
-	// a corresponding action to apply.
+	// a corresponding action to apply. Limited to 1024 rules per policy.
+	// +kubebuilder:validation:MaxItems=1024
+	// +listType=atomic
 	Ingress []Rule `json:"ingress,omitempty" validate:"omitempty,dive"`
 	// The ordered set of egress rules.  Each rule contains a set of packet match criteria and
-	// a corresponding action to apply.
+	// a corresponding action to apply. Limited to 1024 rules per policy.
+	// +kubebuilder:validation:MaxItems=1024
+	// +listType=atomic
 	Egress []Rule `json:"egress,omitempty" validate:"omitempty,dive"`
-	// An option set of labels to apply to each endpoint (in addition to their own labels)
-	// referencing this profile.  If labels configured on the endpoint have keys matching those
-	// labels inherited from the profile, the endpoint label values take precedence.
+	// An optional set of labels to apply to each endpoint (in addition to their own labels)
+	// referencing this profile. If a label key from the profile conflicts with a label already
+	// present on the endpoint, the endpoint's own label value takes precedence.
 	LabelsToApply map[string]string `json:"labelsToApply,omitempty" validate:"omitempty,labels"`
 }
 

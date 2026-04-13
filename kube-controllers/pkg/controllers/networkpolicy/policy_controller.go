@@ -24,9 +24,10 @@ import (
 	log "github.com/sirupsen/logrus"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	uruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
@@ -36,7 +37,6 @@ import (
 	"github.com/projectcalico/calico/kube-controllers/pkg/converter"
 	client "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/calico/libcalico-go/lib/errors"
-	"github.com/projectcalico/calico/libcalico-go/lib/names"
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 )
 
@@ -51,15 +51,25 @@ type policyController struct {
 }
 
 // NewPolicyController returns a controller which manages NetworkPolicy objects.
-func NewPolicyController(ctx context.Context, clientset *kubernetes.Clientset, c client.Interface, cfg config.GenericControllerConfig) controller.Controller {
+func NewPolicyController(ctx context.Context, clientset kubernetes.Interface, c client.Interface, cfg config.GenericControllerConfig) controller.Controller {
 	policyConverter := converter.NewPolicyConverter()
 
-	// Create a NetworkPolicy watcher.
-	listWatcher := cache.NewListWatchFromClient(clientset.NetworkingV1().RESTClient(), "networkpolicies", "", fields.Everything())
+	// Create a NetworkPolicy watcher. Wrap with ToListWatcherWithWatchListSemantics
+	// so the reflector inherits the clientset's WatchList capability signal (fake
+	// clientsets report WatchList as unsupported).
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+			return clientset.NetworkingV1().NetworkPolicies("").List(ctx, opts)
+		},
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+			return clientset.NetworkingV1().NetworkPolicies("").Watch(ctx, opts)
+		},
+	}
+	listWatcher := cache.ToListWatcherWithWatchListSemantics(lw, clientset)
 
 	// Function returns map of policyName:policy stored by policy controller
 	// in datastore.
-	listFunc := func() (map[string]interface{}, error) {
+	listFunc := func() (map[string]any, error) {
 		// Get all policies from datastore
 		calicoPolicies, err := c.NetworkPolicies().List(ctx, options.ListOptions{})
 		if err != nil {
@@ -67,9 +77,9 @@ func NewPolicyController(ctx context.Context, clientset *kubernetes.Clientset, c
 		}
 
 		// Filter in only objects that are written by policy controller.
-		m := make(map[string]interface{})
+		m := make(map[string]any)
 		for _, policy := range calicoPolicies.Items {
-			if strings.HasPrefix(policy.Name, names.K8sNetworkPolicyNamePrefix) {
+			if strings.HasPrefix(policy.Name, converter.KubernetesNetworkPolicyEtcdPrefix) {
 				// Update the network policy's ObjectMeta so that it simply contains the name and namespace.
 				// There is other metadata that we might receive (like resource version) that we don't want to
 				// compare in the cache.
@@ -85,7 +95,7 @@ func NewPolicyController(ctx context.Context, clientset *kubernetes.Clientset, c
 
 	cacheArgs := rcache.ResourceCacheArgs{
 		ListFunc:   listFunc,
-		ObjectType: reflect.TypeOf(api.NetworkPolicy{}),
+		ObjectType: reflect.TypeFor[api.NetworkPolicy](),
 	}
 	ccache := rcache.NewResourceCache(cacheArgs)
 
@@ -96,7 +106,7 @@ func NewPolicyController(ctx context.Context, clientset *kubernetes.Clientset, c
 		ObjectType:    &networkingv1.NetworkPolicy{},
 		ResyncPeriod:  0,
 		Handler: cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				log.Debugf("Got ADD event for network policy: %#v", obj)
 				policy, err := policyConverter.Convert(obj)
 				if err != nil {
@@ -108,7 +118,7 @@ func NewPolicyController(ctx context.Context, clientset *kubernetes.Clientset, c
 				k := policyConverter.GetKey(policy)
 				ccache.Set(k, policy)
 			},
-			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+			UpdateFunc: func(oldObj any, newObj any) {
 				log.Debugf("Got UPDATE event for NetworkPolicy.")
 				log.Debugf("Old object: \n%#v\n", oldObj)
 				log.Debugf("New object: \n%#v\n", newObj)
@@ -122,7 +132,7 @@ func NewPolicyController(ctx context.Context, clientset *kubernetes.Clientset, c
 				k := policyConverter.GetKey(policy)
 				ccache.Set(k, policy)
 			},
-			DeleteFunc: func(obj interface{}) {
+			DeleteFunc: func(obj any) {
 				log.Debugf("Got DELETE event for NetworkPolicy: %#v", obj)
 				policy, err := policyConverter.Convert(obj)
 				if err != nil {

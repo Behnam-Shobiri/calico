@@ -37,17 +37,21 @@ type GlobalNetworkSetList struct {
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster,scope=Cluster,shortName={gns}
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 type GlobalNetworkSet struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
 
-	Spec GlobalNetworkSetSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	Spec GlobalNetworkSetSpec `json:"spec" protobuf:"bytes,2,opt,name=spec"`
 }
 
 // GlobalNetworkSetSpec contains the specification for a NetworkSet resource.
 type GlobalNetworkSetSpec struct {
-	// The list of IP networks that belong to this set.
+	// The list of IP networks that belong to this set. Each entry must be in CIDR notation,
+	// e.g. "192.168.1.0/24". To include a single IP address, use a /32 (IPv4) or /128 (IPv6) mask.
+	// +listType=set
 	Nets []string `json:"nets,omitempty" validate:"omitempty,dive,cidr"`
 }
 

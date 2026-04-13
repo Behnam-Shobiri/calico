@@ -44,9 +44,10 @@ func HashreleasePublished(cfg *hashreleaseserver.Config, hash string, ci bool) (
 // ReformatHashrelease modifies the generated release output to match
 // the "legacy" format our CI tooling expects. This should be temporary until
 // we can update the tooling to expect the new format.
-// Specifically, we need to do two things:
+// Specifically, we need to do the following:
 // - Copy the windows zip file to files/windows/calico-windows-<ver>.zip
-// - Copy tigera-operator-<ver>.tgz to tigera-operator.tgz
+// - Copy all release Helm charts to charts/<chart>.tgz (without the version in the filename)
+// - Additionally keep an unversioned tigera-operator.tgz at the hashrelease root for compatibility
 // - Copy ocp.tgz to manifests/ocp.tgz
 func ReformatHashrelease(hashreleaseOutputDir, tmpDir string) error {
 	logrus.Info("Modifying hashrelease output to match legacy format")
@@ -56,11 +57,12 @@ func ReformatHashrelease(hashreleaseOutputDir, tmpDir string) error {
 	}
 
 	// Copy the windows zip file to files/windows/calico-windows-<ver>.zip
-	if err := os.MkdirAll(filepath.Join(hashreleaseOutputDir, "files", "windows"), 0o755); err != nil {
+	windowsDir := filepath.Join(hashreleaseOutputDir, "files", "windows")
+	if err := os.MkdirAll(windowsDir, 0o755); err != nil {
 		return err
 	}
 	windowsZip := filepath.Join(hashreleaseOutputDir, fmt.Sprintf("calico-windows-%s.zip", versions.ProductVersion()))
-	windowsZipDst := filepath.Join(hashreleaseOutputDir, "files", "windows", fmt.Sprintf("calico-windows-%s.zip", versions.ProductVersion()))
+	windowsZipDst := filepath.Join(windowsDir, fmt.Sprintf("calico-windows-%s.zip", versions.ProductVersion()))
 	if err := utils.CopyFile(windowsZip, windowsZipDst); err != nil {
 		return err
 	}
@@ -72,9 +74,22 @@ func ReformatHashrelease(hashreleaseOutputDir, tmpDir string) error {
 		return err
 	}
 
-	// Copy the operator tarball to tigera-operator.tgz
-	operatorTarball := filepath.Join(hashreleaseOutputDir, fmt.Sprintf("tigera-operator-%s.tgz", versions.HelmChartVersion()))
-	operatorTarballDst := filepath.Join(hashreleaseOutputDir, "tigera-operator.tgz")
+	// Add copy of charts with no version in name
+	chartsDir := filepath.Join(hashreleaseOutputDir, "charts")
+	if err := os.MkdirAll(chartsDir, 0o755); err != nil {
+		return err
+	}
+	for _, chart := range utils.AllReleaseCharts() {
+		chartTarball := filepath.Join(hashreleaseOutputDir, fmt.Sprintf("%s-%s.tgz", chart, versions.HelmChartVersion()))
+		chartTarballDst := filepath.Join(chartsDir, fmt.Sprintf("%s.tgz", chart))
+		if err := utils.CopyFile(chartTarball, chartTarballDst); err != nil {
+			return err
+		}
+	}
+
+	// Keep copy of the Tigera operator chart without version in name in root dir
+	operatorTarball := filepath.Join(hashreleaseOutputDir, fmt.Sprintf("%s-%s.tgz", utils.TigeraOperatorChart, versions.HelmChartVersion()))
+	operatorTarballDst := filepath.Join(hashreleaseOutputDir, fmt.Sprintf("%s.tgz", utils.TigeraOperatorChart))
 	if err := utils.CopyFile(operatorTarball, operatorTarballDst); err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ package calc
 import (
 	"reflect"
 	"testing"
+
+	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
@@ -43,17 +45,18 @@ func TestPolKV_String(t *testing.T) {
 		},
 		{
 			name:     "nil policy",
-			kv:       PolKV{Key: model.PolicyKey{Name: "name"}},
-			expected: "name(nil policy)"},
+			kv:       PolKV{Key: model.PolicyKey{Name: "name", Namespace: "ns", Kind: "kind"}},
+			expected: "kind/ns/name(nil policy)",
+		},
 		{
 			name:     "nil order",
-			kv:       PolKV{Key: model.PolicyKey{Name: "name"}, Value: &nilOrder},
-			expected: "name(default)",
+			kv:       PolKV{Key: model.PolicyKey{Name: "name", Kind: "kind"}, Value: &nilOrder},
+			expected: "kind/name(default)",
 		},
 		{
 			name:     "order set",
-			kv:       PolKV{Key: model.PolicyKey{Name: "name"}, Value: &policyMetadata{Order: 10.5}},
-			expected: "name(10.5)",
+			kv:       PolKV{Key: model.PolicyKey{Name: "name", Kind: "kind"}, Value: &policyMetadata{Order: 10.5, Tier: "default"}},
+			expected: "kind/name(10.5)",
 		},
 	}
 
@@ -69,14 +72,14 @@ func TestPolicySorter_HasPolicy(t *testing.T) {
 	poc := NewPolicySorter()
 	polKey := model.PolicyKey{
 		Name: "test-policy",
-		Tier: "test-tier",
+		Kind: v3.KindGlobalNetworkPolicy,
 	}
 	found := poc.HasPolicy(polKey)
 	if found {
 		t.Error("Unexpectedly found policy when it should not be present")
 	}
 
-	pol := policyMetadata{}
+	pol := policyMetadata{Tier: "default"}
 	_ = poc.UpdatePolicy(polKey, &pol)
 
 	found = poc.HasPolicy(polKey)
@@ -90,24 +93,25 @@ func TestPolicySorter_UpdatePolicy(t *testing.T) {
 
 	polKey := model.PolicyKey{
 		Name: "test-policy",
-		Tier: "default",
+		Kind: v3.KindGlobalNetworkPolicy,
 	}
 
-	pol := policyMetadata{}
+	pol := policyMetadata{Tier: "default"}
 
 	dirty := poc.UpdatePolicy(polKey, &pol)
-	if tierInfo, found := poc.tiers[polKey.Tier]; !found {
+	if tierName, tierInfo := poc.tierForPolicy(polKey, &pol); tierName == "" {
 		t.Error("Adding new policy to tier that does not yet exist - expected tier to be created but it is not found")
 	} else {
 		if !dirty {
 			t.Error("Adding new policy - expected dirty to be true but it was false")
 		}
-		if _, found = tierInfo.Policies[polKey]; !found {
+		if _, found := tierInfo.Policies[polKey]; !found {
 			t.Error("Adding new policy - expected policy to be in Policies but it is not")
 		}
 	}
 
 	newPol := policyMetadata{
+		Tier:  "default",
 		Order: 7,
 	}
 
@@ -154,8 +158,8 @@ func TestPolicySorter_UpdatePolicy(t *testing.T) {
 		t.Error("Deleting existing policy - expected dirty to be true but it was false")
 	}
 
-	if tierInfo, found := poc.tiers[polKey.Tier]; found {
-		if _, found = tierInfo.Policies[polKey]; found {
+	if tierName, tierInfo := poc.tierForPolicy(polKey, nil); tierName != "" {
+		if _, found := tierInfo.Policies[polKey]; found {
 			t.Error("Deleting existing policy - expected policy not to be in Policies but it is")
 		}
 	}
@@ -166,14 +170,128 @@ func TestPolicySorter_UpdatePolicy(t *testing.T) {
 	}
 }
 
+func TestPolicySorter_UpdatePolicy_TierChange(t *testing.T) {
+	poc := NewPolicySorter()
+
+	polKey := model.PolicyKey{
+		Name: "test-policy",
+		Kind: v3.KindGlobalNetworkPolicy,
+	}
+
+	// Add a policy to tier-1.
+	pol := policyMetadata{Tier: "tier-1"}
+	dirty := poc.UpdatePolicy(polKey, &pol)
+	if !dirty {
+		t.Error("Adding new policy - expected dirty to be true")
+	}
+	if _, ti := poc.tierForPolicy(polKey, &pol); ti == nil {
+		t.Fatal("Expected policy to be in tier-1 but tier not found")
+	} else if ti.Name != "tier-1" {
+		t.Errorf("Expected tier name tier-1, got %s", ti.Name)
+	}
+
+	// Move the policy to tier-2 via update.
+	polNewTier := policyMetadata{Tier: "tier-2"}
+	dirty = poc.UpdatePolicy(polKey, &polNewTier)
+	if !dirty {
+		t.Error("Changing policy tier - expected dirty to be true")
+	}
+
+	// Verify the policy is in tier-2.
+	if _, ti := poc.tierForPolicy(polKey, &polNewTier); ti == nil {
+		t.Fatal("Expected policy to be in tier-2 but tier not found")
+	} else if ti.Name != "tier-2" {
+		t.Errorf("Expected tier name tier-2, got %s", ti.Name)
+	}
+
+	// Verify the policy is NOT in tier-1 anymore.
+	if _, found := poc.tiers["tier-1"]; found {
+		// tier-1 should have been cleaned up since it had no valid Tier resource and no policies.
+		if _, polFound := poc.tiers["tier-1"].Policies[polKey]; polFound {
+			t.Error("Policy should have been removed from tier-1 but is still present")
+		}
+	}
+
+	// Move back to tier-1, verify it works.
+	dirty = poc.UpdatePolicy(polKey, &pol)
+	if !dirty {
+		t.Error("Changing policy tier back - expected dirty to be true")
+	}
+	if _, ti := poc.tierForPolicy(polKey, &pol); ti == nil || ti.Name != "tier-1" {
+		t.Error("Expected policy to be back in tier-1")
+	}
+}
+
+func TestPolicySorter_OnUpdate_TierChange(t *testing.T) {
+	poc := NewPolicySorter()
+
+	// Add tier resources so they're valid.
+	poc.OnUpdate(api.Update{
+		KVPair: model.KVPair{Key: model.TierKey{Name: "tier-a"}, Value: &model.Tier{}},
+	})
+	poc.OnUpdate(api.Update{
+		KVPair: model.KVPair{Key: model.TierKey{Name: "tier-b"}, Value: &model.Tier{}},
+	})
+
+	polKey := model.PolicyKey{Name: "my-policy", Kind: v3.KindGlobalNetworkPolicy}
+
+	// Add policy in tier-a.
+	poc.OnUpdate(api.Update{
+		KVPair: model.KVPair{Key: polKey, Value: &model.Policy{Tier: "tier-a"}},
+	})
+	if _, found := poc.tiers["tier-a"].Policies[polKey]; !found {
+		t.Fatal("Expected policy in tier-a")
+	}
+
+	// Move policy to tier-b via an update (same key, different tier value).
+	dirty := poc.OnUpdate(api.Update{
+		KVPair: model.KVPair{Key: polKey, Value: &model.Policy{Tier: "tier-b"}},
+	})
+	if !dirty {
+		t.Error("Changing policy tier via OnUpdate - expected dirty")
+	}
+
+	// Policy should be in tier-b, not tier-a.
+	if _, found := poc.tiers["tier-a"].Policies[polKey]; found {
+		t.Error("Policy should have been removed from tier-a")
+	}
+	if _, found := poc.tiers["tier-b"].Policies[polKey]; !found {
+		t.Error("Policy should be in tier-b")
+	}
+
+	// Sorted output should include tier-b with the policy, but tier-a should still be valid
+	// (it has a Tier resource) even though it has no policies.
+	sorted := poc.Sorted()
+	if len(sorted) != 2 {
+		t.Fatalf("Expected 2 tiers in sorted output, got %d", len(sorted))
+	}
+	foundInTierB := false
+	for _, ti := range sorted {
+		if ti.Name == "tier-b" {
+			if _, found := ti.Policies[polKey]; !found {
+				t.Error("Expected policy in tier-b in sorted output")
+			}
+			foundInTierB = true
+		}
+		if ti.Name == "tier-a" {
+			if len(ti.Policies) != 0 {
+				t.Error("Expected tier-a to have no policies in sorted output")
+			}
+		}
+	}
+	if !foundInTierB {
+		t.Error("tier-b not found in sorted output")
+	}
+}
+
 func TestPolicySorter_OnUpdate_Basic(t *testing.T) {
 	poc := NewPolicySorter()
 
-	policy := model.Policy{}
+	policy := model.Policy{Tier: "default"}
 	kvp := model.KVPair{
 		Key: model.PolicyKey{
 			Name: "test-policy",
-			Tier: "default",
+			Kind: v3.KindGlobalNetworkPolicy,
 		},
 		Value: &policy,
 	}
@@ -204,8 +322,10 @@ func TestPolicySorter_OnUpdate_Basic(t *testing.T) {
 
 func TestPolicySorter_OnUpdate_RemoveFromNonExistent(t *testing.T) {
 	ps := NewPolicySorter()
-	key := model.PolicyKey{Tier: "default", Name: "foo"}
-	pol := &model.Policy{}
+	key := model.PolicyKey{Name: "foo", Kind: v3.KindGlobalNetworkPolicy}
+	pol := &model.Policy{
+		Tier: "default",
+	}
 	ps.OnUpdate(api.Update{
 		KVPair: model.KVPair{
 			Key:   key,
@@ -219,6 +339,7 @@ func TestPolicySorter_OnUpdate_RemoveFromNonExistent(t *testing.T) {
 
 	expectedPolicies := map[model.PolicyKey]policyMetadata{
 		key: {
+			Tier:  "default",
 			Order: polMetaDefaultOrder,
 			Flags: policyMetaIngress | policyMetaEgress,
 		},

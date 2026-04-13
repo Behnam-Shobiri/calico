@@ -25,6 +25,7 @@ const (
 
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster
 
 // CalicoNodeStatusList is a list of CalicoNodeStatus resources.
 type CalicoNodeStatusList struct {
@@ -37,13 +38,19 @@ type CalicoNodeStatusList struct {
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Node",type=string,JSONPath=".spec.node",description="The name of the node"
+// +kubebuilder:printcolumn:name="Classes",type=string,JSONPath=".spec.classes",description="The types of information to monitor for this calico/node"
 
 type CalicoNodeStatus struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
+	metav1.ObjectMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
 
-	Spec   CalicoNodeStatusSpec   `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
-	Status CalicoNodeStatusStatus `json:"status,omitempty" protobuf:"bytes,2,opt,name=status"`
+	Spec CalicoNodeStatusSpec `json:"spec" protobuf:"bytes,2,opt,name=spec"`
+
+	//+optional
+	Status CalicoNodeStatusStatus `json:"status" protobuf:"bytes,2,opt,name=status"`
 }
 
 // CalicoNodeStatusSpec contains the specification for a CalicoNodeStatus resource.
@@ -53,6 +60,7 @@ type CalicoNodeStatusSpec struct {
 
 	// Classes declares the types of information to monitor for this calico/node,
 	// and allows for selective status reporting about certain subsets of information.
+	// +listType=set
 	Classes []NodeStatusClassType `json:"classes,omitempty" validate:"required,unique"`
 
 	// UpdatePeriodSeconds is the period at which CalicoNodeStatus should be updated.
@@ -66,25 +74,31 @@ type CalicoNodeStatusStatus struct {
 	// LastUpdated is a timestamp representing the server time when CalicoNodeStatus object
 	// last updated. It is represented in RFC3339 form and is in UTC.
 	// +nullable
-	LastUpdated metav1.Time `json:"lastUpdated,omitempty"`
+	// +optional
+	LastUpdated metav1.Time `json:"lastUpdated"`
 
 	// Agent holds agent status on the node.
-	Agent CalicoNodeAgentStatus `json:"agent,omitempty"`
+	// +optional
+	Agent CalicoNodeAgentStatus `json:"agent"`
 
 	// BGP holds node BGP status.
-	BGP CalicoNodeBGPStatus `json:"bgp,omitempty"`
+	// +optional
+	BGP CalicoNodeBGPStatus `json:"bgp"`
 
 	// Routes reports routes known to the Calico BGP daemon on the node.
-	Routes CalicoNodeBGPRouteStatus `json:"routes,omitempty"`
+	// +optional
+	Routes CalicoNodeBGPRouteStatus `json:"routes"`
 }
 
 // CalicoNodeAgentStatus defines the observed state of agent status on the node.
 type CalicoNodeAgentStatus struct {
 	// BIRDV4 represents the latest observed status of bird4.
-	BIRDV4 BGPDaemonStatus `json:"birdV4,omitempty"`
+	// +optional
+	BIRDV4 BGPDaemonStatus `json:"birdV4"`
 
 	// BIRDV6 represents the latest observed status of bird6.
-	BIRDV6 BGPDaemonStatus `json:"birdV6,omitempty"`
+	// +optional
+	BIRDV6 BGPDaemonStatus `json:"birdV6"`
 }
 
 // CalicoNodeBGPStatus defines the observed state of BGP status on the node.
@@ -102,18 +116,22 @@ type CalicoNodeBGPStatus struct {
 	NumberNotEstablishedV6 int `json:"numberNotEstablishedV6"`
 
 	// PeersV4 represents IPv4 BGP peers status on the node.
+	// +listType=atomic
 	PeersV4 []CalicoNodePeer `json:"peersV4,omitempty"`
 
 	// PeersV6 represents IPv6 BGP peers status on the node.
+	// +listType=atomic
 	PeersV6 []CalicoNodePeer `json:"peersV6,omitempty"`
 }
 
 // CalicoNodeBGPRouteStatus defines the observed state of routes status on the node.
 type CalicoNodeBGPRouteStatus struct {
 	// RoutesV4 represents IPv4 routes on the node.
+	// +listType=atomic
 	RoutesV4 []CalicoNodeRoute `json:"routesV4,omitempty"`
 
 	// RoutesV6 represents IPv6 routes on the node.
+	// +listType=atomic
 	RoutesV6 []CalicoNodeRoute `json:"routesV6,omitempty"`
 }
 
@@ -141,7 +159,7 @@ type CalicoNodePeer struct {
 	PeerIP string `json:"peerIP,omitempty" validate:"omitempty,ip"`
 
 	// Type indicates whether this peer is configured via the node-to-node mesh,
-	// or via en explicit global or per-node BGPPeer object.
+	// or via an explicit global or per-node BGPPeer object.
 	Type BGPPeerType `json:"type,omitempty"`
 
 	// State is the BGP session state.
@@ -189,6 +207,7 @@ func NewCalicoNodeStatus() *CalicoNodeStatus {
 	}
 }
 
+// +kubebuilder:validation:Enum=FIB;RIB
 type CalicoNodeRouteType string
 
 const (
@@ -196,6 +215,7 @@ const (
 	RouteTypeRIB CalicoNodeRouteType = "RIB"
 )
 
+// +kubebuilder:validation:Enum=Kernel;Static;Direct;NodeMesh;BGPPeer
 type CalicoNodeRouteSourceType string
 
 const (
@@ -206,6 +226,7 @@ const (
 	RouteSourceTypeBGPPeer  CalicoNodeRouteSourceType = "BGPPeer"
 )
 
+// +kubebuilder:validation:Enum=Agent;BGP;Routes
 type NodeStatusClassType string
 
 const (
@@ -214,6 +235,7 @@ const (
 	NodeStatusClassTypeRoutes NodeStatusClassType = "Routes"
 )
 
+// +kubebuilder:validation:Enum=NodeMesh;NodePeer;GlobalPeer
 type BGPPeerType string
 
 const (
@@ -222,6 +244,7 @@ const (
 	BGPPeerTypeGlobalPeer BGPPeerType = "GlobalPeer"
 )
 
+// +kubebuilder:validation:Enum=Ready;NotReady
 type BGPDaemonState string
 
 const (
@@ -229,6 +252,7 @@ const (
 	BGPDaemonStateNotReady BGPDaemonState = "NotReady"
 )
 
+// +kubebuilder:validation:Enum=Idle;Connect;Active;OpenSent;OpenConfirm;Established;Close
 type BGPSessionState string
 
 const (

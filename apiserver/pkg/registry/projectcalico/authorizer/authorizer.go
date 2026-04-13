@@ -54,9 +54,16 @@ func (a *authorizer) AuthorizeTierOperation(
 
 	// We need to check whether the user is authorized to perform the action on the tier.<resourcetype>
 	// resource, with a resource name of either:
-	// - <tier>.*         (this is the wildcard syntax for any Calico policy within a tier)
-	// - <tier>.<policy>  (this checks for a specific policy and tier, or fully wildcarded policy and tier)
+	// - <tier>.*           (wildcard syntax for any Calico policy within a tier; covers both name styles)
+	// - <tier>.<policy>    (old-style: tier-prefixed policy name)
+	// - <policy>           (new-style: bare policy name)
 	// *and* has GET access for the tier.
+	//
+	// The per-policy check uses attributes.GetName() verbatim — whatever the client sent in the
+	// request. Old-style (tier-prefixed) and new-style (bare) names therefore resolve to different
+	// RBAC resource names and are independently authorized: granting access to "tier.policy" does
+	// not grant access to the same object when accessed by its bare name "policy", and vice versa.
+	// The tier.* wildcard check covers both access styles without ambiguity.
 	// These requests can be performed in parallel.
 	wg := sync.WaitGroup{}
 	wg.Add(3)
@@ -80,7 +87,11 @@ func (a *authorizer) AuthorizeTierOperation(
 
 		logrus.Trace("Checking authorization using tier resource type (user can get tier)")
 		logAuthorizerAttributes(attrs)
-		decisionGetTier, _, _ = a.Authorize(context.TODO(), attrs)
+		var reason string
+		decisionGetTier, reason, err = a.Authorize(ctx, attrs)
+		if err != nil {
+			logrus.WithField("reason", reason).Errorf("Error authorizing tier GET request: %v", err)
+		}
 	}()
 
 	// Query required access to the tiered policy resource or tier wildcard resource.
@@ -113,7 +124,10 @@ func (a *authorizer) AuthorizeTierOperation(
 
 		logrus.Trace("Checking authorization using tier scoped resource type (policy name match)")
 		logAuthorizerAttributes(attrs)
-		decisionPolicy, _, _ = a.Authorize(context.TODO(), attrs)
+		decisionPolicy, _, err = a.Authorize(ctx, attrs)
+		if err != nil {
+			logrus.Errorf("Error authorizing tiered policy request: %v", err)
+		}
 	}()
 	go func() {
 		defer wg.Done()
@@ -134,7 +148,10 @@ func (a *authorizer) AuthorizeTierOperation(
 
 		logrus.Trace("Checking authorization using tier scoped resource type (tier name match)")
 		logAuthorizerAttributes(attrs)
-		decisionTierWildcard, _, _ = a.Authorize(context.TODO(), attrs)
+		decisionTierWildcard, _, err = a.Authorize(ctx, attrs)
+		if err != nil {
+			logrus.Errorf("Error authorizing tier wildcard request: %v", err)
+		}
 	}()
 
 	// Wait for the requests to complete.
@@ -142,8 +159,7 @@ func (a *authorizer) AuthorizeTierOperation(
 
 	// If the user has GET access to the tier and either the policy match or tier wildcard match are authorized
 	// then allow the request.
-	if decisionGetTier == k8sauth.DecisionAllow &&
-		(decisionPolicy == k8sauth.DecisionAllow || decisionTierWildcard == k8sauth.DecisionAllow) {
+	if decisionGetTier == k8sauth.DecisionAllow && (decisionPolicy == k8sauth.DecisionAllow || decisionTierWildcard == k8sauth.DecisionAllow) {
 		logrus.Trace("Operation allowed")
 		return nil
 	}

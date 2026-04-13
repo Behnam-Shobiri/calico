@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,11 +16,9 @@ package node_test
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	api "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	v1 "k8s.io/api/core/v1"
@@ -50,7 +48,7 @@ var (
 	retryInterval = 100 * time.Millisecond
 )
 
-var _ = Describe("IPAM garbage collection FV tests with short leak grace period", func() {
+var _ = Describe("IPAM garbage collection FV tests with short leak grace period", Ordered, ContinueOnFailure, func() {
 	var (
 		etcd              *containers.Container
 		controller        *containers.Container
@@ -59,11 +57,12 @@ var _ = Describe("IPAM garbage collection FV tests with short leak grace period"
 		bc                backend.Client
 		k8sClient         *kubernetes.Clientset
 		controllerManager *containers.Container
-		kconfigfile       *os.File
+		kconfigfile       string
+		removeKubeconfig  func()
 		nodeA             string
 	)
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		// Run etcd.
 		etcd = testutils.RunEtcd()
 
@@ -72,17 +71,9 @@ var _ = Describe("IPAM garbage collection FV tests with short leak grace period"
 
 		// Write out a kubeconfig file
 		var err error
-		kconfigfile, err = os.CreateTemp("", "ginkgo-policycontroller")
-		Expect(err).NotTo(HaveOccurred())
-		defer func() { _ = os.Remove(kconfigfile.Name()) }()
-		data := testutils.BuildKubeconfig(apiserver.IP)
-		_, err = kconfigfile.Write([]byte(data))
-		Expect(err).NotTo(HaveOccurred())
+		kconfigfile, removeKubeconfig = testutils.BuildKubeconfig(apiserver.IP)
 
-		// Make the kubeconfig readable by the container.
-		Expect(kconfigfile.Chmod(os.ModePerm)).NotTo(HaveOccurred())
-
-		k8sClient, err = testutils.GetK8sClient(kconfigfile.Name())
+		k8sClient, err = testutils.GetK8sClient(kconfigfile)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wait for the apiserver to be available.
@@ -93,21 +84,29 @@ var _ = Describe("IPAM garbage collection FV tests with short leak grace period"
 
 		// Apply the necessary CRDs. There can sometimes be a delay between starting
 		// the API server and when CRDs are apply-able, so retry here.
-		apply := func() error {
-			out, err := apiserver.ExecOutput("kubectl", "apply", "-f", "/crds/")
-			if err != nil {
-				return fmt.Errorf("%s: %s", err, out)
-			}
-			return nil
-		}
-		Eventually(apply, 10*time.Second, retryInterval).ShouldNot(HaveOccurred())
+		testutils.ApplyCRDs(apiserver)
 
 		// Make a Calico client and backend client.
 		type accessor interface {
 			Backend() backend.Client
 		}
-		calicoClient = testutils.GetCalicoClient(apiconfig.Kubernetes, "", kconfigfile.Name())
+		calicoClient = testutils.GetCalicoClient(apiconfig.Kubernetes, "", kconfigfile)
 		bc = calicoClient.(accessor).Backend()
+
+		// Run controller manager.
+		controllerManager = testutils.RunK8sControllerManager(apiserver.IP)
+	})
+
+	AfterAll(func() {
+		_ = calicoClient.Close()
+		controllerManager.Stop()
+		apiserver.Stop()
+		etcd.Stop()
+		removeKubeconfig()
+	})
+
+	BeforeEach(func() {
+		var err error
 
 		// Create an IP pool with room for 4 blocks.
 		By("creating an IP pool for the test", func() {
@@ -142,15 +141,23 @@ var _ = Describe("IPAM garbage collection FV tests with short leak grace period"
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		By("creating a serviceaccount for the test", func() {
-			sa := &v1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "default",
-					Namespace: "default",
-				},
-			}
+		By("ensuring a serviceaccount exists for the test", func() {
 			Eventually(func() error {
-				_, err := k8sClient.CoreV1().ServiceAccounts("default").Create(
+				_, err := k8sClient.CoreV1().ServiceAccounts("default").Get(
+					context.Background(),
+					"default",
+					metav1.GetOptions{},
+				)
+				if err == nil {
+					return nil
+				}
+				sa := &v1.ServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "default",
+						Namespace: "default",
+					},
+				}
+				_, err = k8sClient.CoreV1().ServiceAccounts("default").Create(
 					context.Background(),
 					sa,
 					metav1.CreateOptions{},
@@ -160,22 +167,12 @@ var _ = Describe("IPAM garbage collection FV tests with short leak grace period"
 		})
 
 		// Start the controller.
-		controller = testutils.RunPolicyController(apiconfig.Kubernetes, "", kconfigfile.Name(), "node")
-
-		// Run controller manager.
-		controllerManager = testutils.RunK8sControllerManager(apiserver.IP)
+		controller = testutils.RunKubeControllers(apiconfig.Kubernetes, "", kconfigfile, "node")
 	})
 
 	AfterEach(func() {
-		// Delete the IP pool.
-		_, err := calicoClient.IPPools().Delete(context.Background(), "test-ipam-gc-ippool", options.DeleteOptions{})
-		Expect(err).NotTo(HaveOccurred())
-
-		_ = calicoClient.Close()
-		controllerManager.Stop()
 		controller.Stop()
-		apiserver.Stop()
-		etcd.Stop()
+		testutils.CleanupAllResources(context.Background(), k8sClient, calicoClient, bc, testutils.CleanupOptions{DeletePodsBeforeNodes: true})
 	})
 
 	It("should NOT clean up tunnel IP allocations", func() {
@@ -582,7 +579,7 @@ var _ = Describe("IPAM garbage collection FV tests with short leak grace period"
 	})
 })
 
-var _ = Describe("IPAM garbage collection FV tests with long leak grace period", func() {
+var _ = Describe("IPAM garbage collection FV tests with long leak grace period", Ordered, ContinueOnFailure, func() {
 	var (
 		etcd              *containers.Container
 		controller        *containers.Container
@@ -591,11 +588,12 @@ var _ = Describe("IPAM garbage collection FV tests with long leak grace period",
 		bc                backend.Client
 		k8sClient         *kubernetes.Clientset
 		controllerManager *containers.Container
-		kconfigfile       *os.File
+		kconfigfile       string
 		nodeA             string
+		removeKubeconfig  func()
 	)
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		// Run etcd.
 		etcd = testutils.RunEtcd()
 
@@ -604,17 +602,9 @@ var _ = Describe("IPAM garbage collection FV tests with long leak grace period",
 
 		// Write out a kubeconfig file
 		var err error
-		kconfigfile, err = os.CreateTemp("", "ginkgo-policycontroller")
-		Expect(err).NotTo(HaveOccurred())
-		defer func() { _ = os.Remove(kconfigfile.Name()) }()
-		data := testutils.BuildKubeconfig(apiserver.IP)
-		_, err = kconfigfile.Write([]byte(data))
-		Expect(err).NotTo(HaveOccurred())
+		kconfigfile, removeKubeconfig = testutils.BuildKubeconfig(apiserver.IP)
 
-		// Make the kubeconfig readable by the container.
-		Expect(kconfigfile.Chmod(os.ModePerm)).NotTo(HaveOccurred())
-
-		k8sClient, err = testutils.GetK8sClient(kconfigfile.Name())
+		k8sClient, err = testutils.GetK8sClient(kconfigfile)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wait for the apiserver to be available.
@@ -625,21 +615,29 @@ var _ = Describe("IPAM garbage collection FV tests with long leak grace period",
 
 		// Apply the necessary CRDs. There can sometimes be a delay between starting
 		// the API server and when CRDs are apply-able, so retry here.
-		apply := func() error {
-			out, err := apiserver.ExecOutput("kubectl", "apply", "-f", "/crds/")
-			if err != nil {
-				return fmt.Errorf("%s: %s", err, out)
-			}
-			return nil
-		}
-		Eventually(apply, 10*time.Second, retryInterval).ShouldNot(HaveOccurred())
+		testutils.ApplyCRDs(apiserver)
 
 		// Make a Calico client and backend client.
 		type accessor interface {
 			Backend() backend.Client
 		}
-		calicoClient = testutils.GetCalicoClient(apiconfig.Kubernetes, "", kconfigfile.Name())
+		calicoClient = testutils.GetCalicoClient(apiconfig.Kubernetes, "", kconfigfile)
 		bc = calicoClient.(accessor).Backend()
+
+		// Run controller manager.
+		controllerManager = testutils.RunK8sControllerManager(apiserver.IP)
+	})
+
+	AfterAll(func() {
+		_ = calicoClient.Close()
+		controllerManager.Stop()
+		apiserver.Stop()
+		etcd.Stop()
+		removeKubeconfig()
+	})
+
+	BeforeEach(func() {
+		var err error
 
 		// Create an IP pool with room for 4 blocks.
 		By("creating an IP pool for the test", func() {
@@ -675,15 +673,23 @@ var _ = Describe("IPAM garbage collection FV tests with long leak grace period",
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		By("creating a serviceaccount for the test", func() {
-			sa := &v1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "default",
-					Namespace: "default",
-				},
-			}
+		By("ensuring a serviceaccount exists for the test", func() {
 			Eventually(func() error {
-				_, err := k8sClient.CoreV1().ServiceAccounts("default").Create(
+				_, err := k8sClient.CoreV1().ServiceAccounts("default").Get(
+					context.Background(),
+					"default",
+					metav1.GetOptions{},
+				)
+				if err == nil {
+					return nil
+				}
+				sa := &v1.ServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "default",
+						Namespace: "default",
+					},
+				}
+				_, err = k8sClient.CoreV1().ServiceAccounts("default").Create(
 					context.Background(),
 					sa,
 					metav1.CreateOptions{},
@@ -693,22 +699,12 @@ var _ = Describe("IPAM garbage collection FV tests with long leak grace period",
 		})
 
 		// Start the controller.
-		controller = testutils.RunPolicyController(apiconfig.Kubernetes, "", kconfigfile.Name(), "node")
-
-		// Run controller manager.
-		controllerManager = testutils.RunK8sControllerManager(apiserver.IP)
+		controller = testutils.RunKubeControllers(apiconfig.Kubernetes, "", kconfigfile, "node")
 	})
 
 	AfterEach(func() {
-		// Delete the IP pool.
-		_, err := calicoClient.IPPools().Delete(context.Background(), "test-ipam-gc-ippool", options.DeleteOptions{})
-		Expect(err).NotTo(HaveOccurred())
-
-		_ = calicoClient.Close()
-		controllerManager.Stop()
 		controller.Stop()
-		apiserver.Stop()
-		etcd.Stop()
+		testutils.CleanupAllResources(context.Background(), k8sClient, calicoClient, bc, testutils.CleanupOptions{DeletePodsBeforeNodes: true})
 	})
 
 	It("should NOT clean up empty blocks within the grace period", func() {

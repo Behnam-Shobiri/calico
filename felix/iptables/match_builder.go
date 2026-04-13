@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -325,6 +325,14 @@ func (m matchCriteria) NotICMPV6TypeAndCode(t, c uint8) generictables.MatchCrite
 	return append(m, fmt.Sprintf("-m icmp6 ! --icmpv6-type %d/%d", t, c))
 }
 
+// The expected rate must be an integer (0~9999) with /second, /minute, /hour, or /day suffix.
+func (m matchCriteria) Limit(rate string, burst uint16) generictables.MatchCriteria {
+	if burst == 0 {
+		return append(m, fmt.Sprintf("-m limit --limit %s", rate))
+	}
+	return append(m, fmt.Sprintf("-m limit --limit %s --limit-burst %d", rate, burst))
+}
+
 func (m matchCriteria) InInterfaceVMAP(mapname string) generictables.MatchCriteria {
 	log.Panic("InInterfaceVMAP not supported in iptables")
 	return m
@@ -332,6 +340,16 @@ func (m matchCriteria) InInterfaceVMAP(mapname string) generictables.MatchCriter
 
 func (m matchCriteria) OutInterfaceVMAP(mapname string) generictables.MatchCriteria {
 	log.Panic("OutInterfaceVMAP not supported in iptables")
+	return m
+}
+
+func (m matchCriteria) ARPOperation(op string) generictables.MatchCriteria {
+	log.Panic("ARPOperation not supported in iptables")
+	return m
+}
+
+func (m matchCriteria) ARPSrcIP(ip string) generictables.MatchCriteria {
+	log.Panic("ARPSrcIP not supported in iptables")
 	return m
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package updateprocessors
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
@@ -207,9 +208,7 @@ func RuleAPIV3ToBackend(ar apiv3.Rule, ns string) model.Rule {
 	if ar.Metadata != nil {
 		if ar.Metadata.Annotations != nil {
 			r.Metadata = &model.RuleMetadata{Annotations: make(map[string]string)}
-			for k, v := range ar.Metadata.Annotations {
-				r.Metadata.Annotations[k] = v
-			}
+			maps.Copy(r.Metadata.Annotations, ar.Metadata.Annotations)
 		}
 	}
 	return r
@@ -271,14 +270,17 @@ func normalizeIPNet(n string) *cnet.IPNet {
 }
 
 // NormalizeIPNets converts an []*IPNet to a slice of networks by ensuring the IP addresses
-// are correctly masked.
+// are correctly masked. Unparseable CIDRs are skipped.
 func NormalizeIPNets(nets []string) []*cnet.IPNet {
 	if len(nets) == 0 {
 		return nil
 	}
-	out := make([]*cnet.IPNet, len(nets))
-	for i, n := range nets {
-		out[i] = normalizeIPNet(n)
+	var out []*cnet.IPNet
+	for _, n := range nets {
+		ipn := normalizeIPNet(n)
+		if ipn != nil {
+			out = append(out, ipn)
+		}
 	}
 	return out
 }

@@ -159,6 +159,7 @@ type ValueInterface interface {
 	Data() EntryData
 	IsForwardDSR() bool
 	String() string
+	SetFlags(flags uint32) ValueInterface
 }
 
 func (e Value) RSTSeen() int64 {
@@ -203,6 +204,15 @@ func (e Value) OrigSrcIP() net.IP {
 	return e[VoOrigSIP : VoOrigSIP+4]
 }
 
+// SetFlags sets the flags in the value, replacing any existing flags
+func (e Value) SetFlags(flags uint32) ValueInterface {
+	e[VoFlags] = byte(flags & 0xff)
+	e[VoFlags2] = byte((flags >> 8) & 0xff)
+	e[VoFlags3] = byte((flags >> 16) & 0xff)
+	e[VoFlags4] = byte((flags >> 24) & 0xff)
+	return e
+}
+
 const (
 	TypeNormal uint8 = iota
 	TypeNATForward
@@ -225,7 +235,40 @@ const (
 	FlagNoRedirPeer uint32 = (1 << 14)
 	FlagSetDSCP     uint32 = (1 << 15)
 	FlagMaglev      uint32 = (1 << 16)
+	FlagSendRST     uint32 = (1 << 17)
 )
+
+// FlagNames returns the human-readable names for the set bits in flags.
+func FlagNames(flags uint32) []string {
+	flagTable := []struct {
+		flag uint32
+		name string
+	}{
+		{FlagNATOut, "nat-out"},
+		{FlagNATFwdDsr, "fwd-dsr"},
+		{FlagNATNPFwd, "np-fwd"},
+		{FlagSkipFIB, "skip-fib"},
+		{FlagExtLocal, "ext-local"},
+		{FlagViaNATIf, "via-nat-iface"},
+		{FlagSrcDstBA, "B-A"},
+		{FlagHostPSNAT, "host-psnat"},
+		{FlagSvcSelf, "svc-self"},
+		{FlagNPLoop, "np-loop"},
+		{FlagNPRemote, "np-remote"},
+		{FlagNoDSR, "no-dsr"},
+		{FlagNoRedirPeer, "no-redir-peer"},
+		{FlagSetDSCP, "dscp"},
+		{FlagMaglev, "maglev"},
+		{FlagSendRST, "send-rst"},
+	}
+	var names []string
+	for _, f := range flagTable {
+		if flags&f.flag != 0 {
+			names = append(names, f.name)
+		}
+	}
+	return names
+}
 
 func (e Value) ReverseNATKey() KeyInterface {
 	var ret Key

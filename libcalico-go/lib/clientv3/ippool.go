@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package clientv3
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -35,6 +36,7 @@ import (
 type IPPoolInterface interface {
 	Create(ctx context.Context, res *apiv3.IPPool, opts options.SetOptions) (*apiv3.IPPool, error)
 	Update(ctx context.Context, res *apiv3.IPPool, opts options.SetOptions) (*apiv3.IPPool, error)
+	UpdateStatus(ctx context.Context, res *apiv3.IPPool, opts options.SetOptions) (*apiv3.IPPool, error)
 	Delete(ctx context.Context, name string, opts options.DeleteOptions) (*apiv3.IPPool, error)
 	Get(ctx context.Context, name string, opts options.GetOptions) (*apiv3.IPPool, error)
 	List(ctx context.Context, opts options.ListOptions) (*apiv3.IPPoolList, error)
@@ -139,6 +141,16 @@ func (r ipPools) Update(ctx context.Context, res *apiv3.IPPool, opts options.Set
 	}
 
 	out, err := r.client.resources.Update(ctx, opts, apiv3.KindIPPool, res)
+	if out != nil {
+		return out.(*apiv3.IPPool), err
+	}
+	return nil, err
+}
+
+// UpdateStatus takes the representation of an IPPool and updates its status.
+// Returns the stored representation of the IPPool, and an error, if there is any.
+func (r ipPools) UpdateStatus(ctx context.Context, res *apiv3.IPPool, opts options.SetOptions) (*apiv3.IPPool, error) {
+	out, err := r.client.resources.UpdateStatus(ctx, opts, apiv3.KindIPPool, res)
 	if out != nil {
 		return out.(*apiv3.IPPool), err
 	}
@@ -296,6 +308,47 @@ func (r ipPools) Watch(ctx context.Context, opts options.ListOptions) (watch.Int
 	return r.client.resources.Watch(ctx, opts, apiv3.KindIPPool, nil)
 }
 
+// cidrChangeOK returns true if the new CIDR is an acceptable update to the old one.
+//
+// Allowed cases:
+//   - The CIDRs match exactly.
+//   - The CIDRs are semantically identical and the new CIDR is simply the canonical
+//     form of the old one (i.e., the update only normalizes formatting).
+//
+// This accounts for clients that may have stored non-canonical CIDRs by bypassing
+// our validation logic, allowing updates that preserve the same network while
+// converting the CIDR to its canonical form.
+func cidrChangeOK(oldCIDR, newCIDR string) bool {
+	// 1. If strings match exactly, allow.
+	if oldCIDR == newCIDR {
+		return true
+	}
+
+	// Parse both
+	_, oldNet, errOld := net.ParseCIDR(oldCIDR)
+	_, newNet, errNew := net.ParseCIDR(newCIDR)
+
+	// If either fails to parse → reject
+	if errOld != nil || errNew != nil {
+		return false
+	}
+
+	// 2. Check semantic equality (same network IP + mask)
+	sameNetwork := oldNet.IP.Equal(newNet.IP) &&
+		bytes.Equal(oldNet.Mask, newNet.Mask)
+	if !sameNetwork {
+		return false
+	}
+
+	// 3. New CIDR must already be canonical (IPNet.String()); don't allow introducing
+	// a non-canonical CIDR.
+	if newCIDR != newNet.String() {
+		return false
+	}
+
+	return true
+}
+
 // validateAndSetDefaults validates IPPool fields and sets default values that are
 // not assigned.
 // The old pool will be unassigned for a Create.
@@ -333,9 +386,9 @@ func (r ipPools) validateAndSetDefaults(ctx context.Context, new, old *apiv3.IPP
 	}
 
 	// If there was a previous pool then this must be an Update, validate that the
-	// CIDR has not changed.  Since we are using normalized CIDRs we can just do a
-	// simple string comparison.
-	if old != nil && old.Spec.CIDR != new.Spec.CIDR {
+	// CIDR has not changed. Use semantic comparison to handle different textual
+	// representations of the same CIDR (e.g., IPv6 with different zero compression).
+	if old != nil && !cidrChangeOK(old.Spec.CIDR, new.Spec.CIDR) {
 		errFields = append(errFields, cerrors.ErroredField{
 			Name:   "IPPool.Spec.CIDR",
 			Reason: "IPPool CIDR cannot be modified",

@@ -48,7 +48,9 @@ type TcGlobalData struct {
 	JumpsV6        [40]uint32
 
 	DSCP          int8
+	IstioDSCP     int8
 	MaglevLUTSize uint32
+	IPFragTimeout uint32
 }
 
 type XDPGlobalData struct {

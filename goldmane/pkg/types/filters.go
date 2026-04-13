@@ -70,6 +70,8 @@ func Matches(filter *proto.Filter, key *FlowKey) bool {
 		&stringComparison{filter: filter.DestNamespaces, genVals: namespaces(key.DestNamespace)},
 		&stringComparison{filter: filter.Protocols, genVals: func() []string { return []string{key.Proto()} }},
 		&actionMatch{filter: filter.Actions, key: key},
+		&pendingActionMatch{filter: filter.PendingActions, key: key},
+		&reporterMatch{filter: filter.Reporter, key: key},
 		&portComparison{filter: filter.DestPorts, key: key},
 		&policyComparison{filter: filter.Policies, key: key},
 	}
@@ -98,6 +100,40 @@ func (a *actionMatch) matches() bool {
 		return true
 	}
 	return slices.Contains(a.filter, a.key.Action())
+}
+
+type pendingActionMatch struct {
+	filter []proto.Action
+	key    *FlowKey
+}
+
+func (a *pendingActionMatch) matches() bool {
+	if len(a.filter) == 0 {
+		return true
+	}
+
+	policyTrace := FlowLogPolicyToProto(a.key.Policies())
+
+	for _, hit := range policyTrace.PendingPolicies {
+		if slices.Contains(a.filter, hit.Action) {
+			return true
+		}
+	}
+
+	return false
+}
+
+type reporterMatch struct {
+	filter proto.Reporter
+	key    *FlowKey
+}
+
+func (r *reporterMatch) matches() bool {
+	if r.filter == proto.Reporter_ReporterUnspecified {
+		// No filter value specified, so this comparison matches.
+		return true
+	}
+	return r.filter == r.key.Reporter()
 }
 
 type portComparison struct {
@@ -189,16 +225,16 @@ func (c policyComparison) policyHitMatches(h *proto.PolicyHit) bool {
 
 func (c policyComparison) filterMatches(h *proto.PolicyHit, filter *proto.PolicyMatch) bool {
 	// Check Name, Kind, Namespace, Tier, Action.
-	if filter.Name != "" && h.Name != filter.Name {
+	if !StringMatchMatches(filter.Name, h.Name) {
 		return false
 	}
 	if filter.Kind != proto.PolicyKind_KindUnspecified && h.Kind != filter.Kind {
 		return false
 	}
-	if filter.Namespace != "" && h.Namespace != filter.Namespace {
+	if !StringMatchMatches(filter.Namespace, h.Namespace) {
 		return false
 	}
-	if filter.Tier != "" && h.Tier != filter.Tier {
+	if !StringMatchMatches(filter.Tier, h.Tier) {
 		return false
 	}
 	if filter.Action != proto.Action_ActionUnspecified && h.Action != filter.Action {
@@ -206,4 +242,17 @@ func (c policyComparison) filterMatches(h *proto.PolicyHit, filter *proto.Policy
 	}
 
 	return true
+}
+
+// StringMatchMatches returns true if the given value matches the StringMatch filter.
+// A nil filter or empty value means no filter is specified, so it always matches.
+func StringMatchMatches(sm *proto.StringMatch, val string) bool {
+	if sm == nil || sm.Value == "" {
+		return true
+	}
+	if sm.Type == proto.MatchType_Exact {
+		return val == sm.Value
+	}
+	// Fuzzy match uses substring matching, consistent with stringComparison.matchFilter.
+	return strings.Contains(val, sm.Value)
 }

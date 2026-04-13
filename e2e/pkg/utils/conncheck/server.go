@@ -44,15 +44,42 @@ func NewServer(name string, ns *v1.Namespace, opts ...ServerOption) *Server {
 }
 
 type Server struct {
-	name          string
-	namespace     *v1.Namespace
-	ports         []int
-	labels        map[string]string
-	pod           *v1.Pod
-	service       *v1.Service
-	podCustomizer func(*v1.Pod)
-	svcCustomizer func(*v1.Service)
-	autoCreateSvc bool
+	name           string
+	namespace      *v1.Namespace
+	ports          []int
+	labels         map[string]string
+	pod            *v1.Pod
+	service        *v1.Service
+	podCustomizers []func(*v1.Pod)
+	svcCustomizers []func(*v1.Service)
+	autoCreateSvc  bool
+	echoServer     bool
+}
+
+// composedPodCustomizer returns a single customizer function that applies all
+// registered pod customizers in order, or nil if none are registered.
+func (s *Server) composedPodCustomizer() func(*v1.Pod) {
+	if len(s.podCustomizers) == 0 {
+		return nil
+	}
+	return func(pod *v1.Pod) {
+		for _, c := range s.podCustomizers {
+			c(pod)
+		}
+	}
+}
+
+// composedSvcCustomizer returns a single customizer function that applies all
+// registered service customizers in order, or nil if none are registered.
+func (s *Server) composedSvcCustomizer() func(*v1.Service) {
+	if len(s.svcCustomizers) == 0 {
+		return nil
+	}
+	return func(svc *v1.Service) {
+		for _, c := range s.svcCustomizers {
+			c(svc)
+		}
+	}
 }
 
 func (s *Server) ID() string {
@@ -193,14 +220,20 @@ func (s *Server) NodePortPort() int {
 
 // NodePort returns a target that can be used to connect to the service's NodePort.
 // Callers should pass in the IP of a cluster node.
-func (s *Server) NodePort(nodeIP string) Target {
-	return &target{
+func (s *Server) NodePort(nodeIP string, opts ...TargetOption) Target {
+	t := &target{
 		server:      s,
 		targetType:  TypeNodePort,
 		destination: nodeIP,
 		port:        s.NodePortPort(),
 		protocol:    TCP,
 	}
+	for _, opt := range opts {
+		if err := opt(t); err != nil {
+			framework.ExpectNoError(err)
+		}
+	}
+	return t
 }
 
 // ICMP returns a target that can be used to connect to the pod's IP directly using ICMP.
@@ -240,32 +273,23 @@ func WithServerLabels(labels map[string]string) ServerOption {
 
 func WithHostNetworking() ServerOption {
 	return func(c *Server) error {
-		if c.podCustomizer != nil {
-			return fmt.Errorf("customizer already set")
-		}
-		c.podCustomizer = func(pod *v1.Pod) {
+		c.podCustomizers = append(c.podCustomizers, func(pod *v1.Pod) {
 			pod.Spec.HostNetwork = true
-		}
+		})
 		return nil
 	}
 }
 
 func WithServerPodCustomizer(customizer func(*v1.Pod)) ServerOption {
 	return func(c *Server) error {
-		if c.podCustomizer != nil {
-			return fmt.Errorf("Pod customizer already set")
-		}
-		c.podCustomizer = customizer
+		c.podCustomizers = append(c.podCustomizers, customizer)
 		return nil
 	}
 }
 
 func WithServerSvcCustomizer(customizer func(*v1.Service)) ServerOption {
 	return func(c *Server) error {
-		if c.svcCustomizer != nil {
-			return fmt.Errorf("Service customizer already set")
-		}
-		c.svcCustomizer = customizer
+		c.svcCustomizers = append(c.svcCustomizers, customizer)
 		return nil
 	}
 }
@@ -280,6 +304,46 @@ func WithPorts(ports ...int) ServerOption {
 func WithAutoCreateService(autoCreate bool) ServerOption {
 	return func(c *Server) error {
 		c.autoCreateSvc = autoCreate
+		return nil
+	}
+}
+
+// WithEchoServer configures the server to use the EchoServer (agnhost netexec)
+// image instead of TestWebserver. The EchoServer's /clientip endpoint returns
+// the client address in "IP:port" format, useful for SNAT detection.
+func WithEchoServer() ServerOption {
+	return func(c *Server) error {
+		c.echoServer = true
+		return nil
+	}
+}
+
+// WithNodePortService configures the server's service as type NodePort.
+func WithNodePortService() ServerOption {
+	return func(c *Server) error {
+		c.svcCustomizers = append(c.svcCustomizers, func(svc *v1.Service) {
+			svc.Spec.Type = v1.ServiceTypeNodePort
+		})
+		return nil
+	}
+}
+
+// WithExternalIP adds an external IP to the server's service.
+func WithExternalIP(ip string) ServerOption {
+	return func(c *Server) error {
+		c.svcCustomizers = append(c.svcCustomizers, func(svc *v1.Service) {
+			svc.Spec.ExternalIPs = append(svc.Spec.ExternalIPs, ip)
+		})
+		return nil
+	}
+}
+
+// WithExternalTrafficPolicy sets the external traffic policy on the server's service.
+func WithExternalTrafficPolicy(policy v1.ServiceExternalTrafficPolicy) ServerOption {
+	return func(c *Server) error {
+		c.svcCustomizers = append(c.svcCustomizers, func(svc *v1.Service) {
+			svc.Spec.ExternalTrafficPolicy = policy
+		})
 		return nil
 	}
 }

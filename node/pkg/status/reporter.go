@@ -1,4 +1,4 @@
-// Copyright (c) 2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2021-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -219,11 +219,11 @@ func (r *reporter) reportStatus() error {
 	var err error
 	var updatedResource *apiv3.CalicoNodeStatus
 	// Update resource
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		status.Status.LastUpdated = metav1.Time{Time: time.Now()}
-		updatedResource, err = r.client.CalicoNodeStatus().Update(ctx, &status, options.SetOptions{})
+		updatedResource, err = r.client.CalicoNodeStatus().UpdateStatus(ctx, &status, options.SetOptions{})
 		if err != nil {
 			if _, ok := err.(cerrors.ErrorResourceUpdateConflict); ok {
 				r.logCtx.Warn("Node status resource update conflict, trying to catch-up with current resource")

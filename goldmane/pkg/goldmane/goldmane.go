@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
 	"github.com/projectcalico/calico/goldmane/pkg/stream"
@@ -108,28 +110,6 @@ func init() {
 	prometheus.MustRegister(numDroppedFlows)
 }
 
-// listRequest is an internal helper used to synchronously request matching flows from the aggregator.
-type listRequest struct {
-	respCh chan *listResponse
-	req    *proto.FlowListRequest
-}
-
-type listResponse struct {
-	results *proto.FlowListResult
-	err     error
-}
-
-// filterHintsRequest is an internal helper used to synchronously request filter hints from the aggregator.
-type filterHintsRequest struct {
-	respCh chan *filterHintsResponse
-	req    *proto.FilterHintsRequest
-}
-
-type filterHintsResponse struct {
-	results *proto.FilterHintsResult
-	err     error
-}
-
 // sinkRequest is an internal helper used to set the sink for the aggregator, which can by modified at runtime.
 type sinkRequest struct {
 	sink storage.Sink
@@ -188,6 +168,7 @@ type Goldmane struct {
 	// The following channels are input channels to make resuests of the main loop.
 	listRequests        chan listRequest
 	filterHintsRequests chan filterHintsRequest
+	statisticsRequests  chan statisticsRequest
 	sinkChan            chan *sinkRequest
 	recvChan            chan *types.Flow
 }
@@ -199,6 +180,7 @@ func NewGoldmane(opts ...Option) *Goldmane {
 		done:                make(chan struct{}),
 		listRequests:        make(chan listRequest),
 		filterHintsRequests: make(chan filterHintsRequest),
+		statisticsRequests:  make(chan statisticsRequest),
 		sinkChan:            make(chan *sinkRequest, 10),
 		recvChan:            make(chan *types.Flow, channelDepth),
 		rolloverFunc:        time.After,
@@ -297,6 +279,8 @@ func (a *Goldmane) run(startTime int64, ready chan<- struct{}) {
 			req.respCh <- a.queryFlows(req.req)
 		case req := <-a.filterHintsRequests:
 			req.respCh <- a.queryFilterHints(req.req)
+		case req := <-a.statisticsRequests:
+			req.respCh <- a.queryStatistics(req.req)
 		case stream := <-a.streams.Backfills():
 			a.backfill(stream)
 		case req := <-a.sinkChan:
@@ -345,40 +329,9 @@ func (a *Goldmane) Stream(req *proto.FlowStreamRequest) (stream.Stream, error) {
 	// Wait for a response.
 	s := <-respCh
 	if s == nil {
-		return nil, fmt.Errorf("failed to establish new stream")
+		return nil, status.Error(codes.ResourceExhausted, "max number of streams reached, try again later")
 	}
 	return s, nil
-}
-
-// List returns a list of flows that match the given request. It uses a channel to
-// synchronously request the flows from the aggregator.
-func (a *Goldmane) List(req *proto.FlowListRequest) (*proto.FlowListResult, error) {
-	respCh := make(chan *listResponse)
-	defer close(respCh)
-	a.listRequests <- listRequest{respCh, req}
-	resp := <-respCh
-	return resp.results, resp.err
-}
-
-func (a *Goldmane) Hints(req *proto.FilterHintsRequest) (*proto.FilterHintsResult, error) {
-	logrus.WithField("req", req).Debug("Received hints request")
-
-	respCh := make(chan *filterHintsResponse)
-	defer close(respCh)
-	a.filterHintsRequests <- filterHintsRequest{respCh, req}
-	resp := <-respCh
-
-	return resp.results, resp.err
-}
-
-func (a *Goldmane) validateListRequest(req *proto.FlowListRequest) error {
-	if err := a.validateTimeRange(req.StartTimeGte, req.StartTimeLt); err != nil {
-		return err
-	}
-	if len(req.SortBy) > 1 {
-		return fmt.Errorf("at most one sort order is supported")
-	}
-	return nil
 }
 
 func (a *Goldmane) validateTimeRange(startTimeGt, startTimeLt int64) error {
@@ -388,15 +341,37 @@ func (a *Goldmane) validateTimeRange(startTimeGt, startTimeLt int64) error {
 	return nil
 }
 
+// statisticsRequest is an internal helper used to synchronously request statistics from the aggregator.
+type statisticsRequest struct {
+	respCh chan *statisticsResponse
+	req    *proto.StatisticsRequest
+}
+
+type statisticsResponse struct {
+	results []*proto.StatisticsResult
+	err     error
+}
+
+// Statistics returns statistics matching the given request. It uses a channel to
+// synchronously request the data from the aggregator's main loop.
 func (a *Goldmane) Statistics(req *proto.StatisticsRequest) ([]*proto.StatisticsResult, error) {
+	respCh := make(chan *statisticsResponse)
+	defer close(respCh)
+	a.statisticsRequests <- statisticsRequest{respCh, req}
+	resp := <-respCh
+	return resp.results, resp.err
+}
+
+func (a *Goldmane) queryStatistics(req *proto.StatisticsRequest) *statisticsResponse {
 	// Sanitize the time range, resolving any relative time values.
 	req.StartTimeGte, req.StartTimeLt = a.normalizeTimeRange(req.StartTimeGte, req.StartTimeLt)
 
 	if err := a.validateTimeRange(req.StartTimeGte, req.StartTimeLt); err != nil {
 		logrus.WithField("req", req).WithError(err).Debug("Invalid time range")
-		return nil, err
+		return &statisticsResponse{err: err}
 	}
-	return a.flowStore.Statistics(req)
+	results, err := a.flowStore.Statistics(req)
+	return &statisticsResponse{results: results, err: err}
 }
 
 // backfill fills a new Stream instance with historical Flow data based on the request.
@@ -439,75 +414,6 @@ func (a *Goldmane) normalizeTimeRange(gt, lt int64) (int64, int64) {
 		logrus.WithField("lt", lt).Debug("No end time provided, defaulting to current time")
 	}
 	return gt, lt
-}
-
-func (a *Goldmane) queryFlows(req *proto.FlowListRequest) *listResponse {
-	logrus.WithFields(logrus.Fields{"req": req}).Debug("Received flow request")
-
-	// Sanitize the time range, resolving any relative time values.
-	req.StartTimeGte, req.StartTimeLt = a.normalizeTimeRange(req.StartTimeGte, req.StartTimeLt)
-
-	// Validate the request.
-	if err := a.validateListRequest(req); err != nil {
-		return &listResponse{nil, err}
-	}
-
-	flowsToReturn, meta, err := a.flowStore.List(req)
-	if err != nil {
-		logrus.WithError(err).Warn("Error listing flows")
-		return &listResponse{nil, err}
-	}
-
-	return &listResponse{&proto.FlowListResult{
-		Meta: &proto.ListMetadata{
-			TotalPages:   int64(meta.TotalPages),
-			TotalResults: int64(meta.TotalResults),
-		},
-		Flows: a.flowsToResult(flowsToReturn),
-	}, nil}
-}
-
-func (a *Goldmane) queryFilterHints(req *proto.FilterHintsRequest) *filterHintsResponse {
-	logrus.WithFields(logrus.Fields{"req": req}).Debug("Received filter hints request.")
-
-	// Sanitize the time range, resolving any relative time values.
-	req.StartTimeGte, req.StartTimeLt = a.normalizeTimeRange(req.StartTimeGte, req.StartTimeLt)
-
-	// Validate the request.
-	if err := a.validateTimeRange(req.StartTimeGte, req.StartTimeLt); err != nil {
-		return &filterHintsResponse{nil, err}
-	}
-
-	values, meta, err := a.flowStore.FilterHints(req)
-	if err != nil {
-		logrus.WithError(err).Warn("Error listing filter hints")
-		return &filterHintsResponse{nil, err}
-	}
-
-	var hints []*proto.FilterHint
-	for _, value := range values {
-		hints = append(hints, &proto.FilterHint{Value: value})
-	}
-
-	return &filterHintsResponse{&proto.FilterHintsResult{
-		Meta: &proto.ListMetadata{
-			TotalPages:   int64(meta.TotalPages),
-			TotalResults: int64(meta.TotalResults),
-		},
-		Hints: hints,
-	}, nil}
-}
-
-// flowsToResult converts a list of internal Flow objects to a list of proto.FlowResult objects.
-func (a *Goldmane) flowsToResult(flows []*types.Flow) []*proto.FlowResult {
-	var flowsToReturn []*proto.FlowResult
-	for _, flow := range flows {
-		flowsToReturn = append(flowsToReturn, &proto.FlowResult{
-			Flow: types.FlowToProto(flow),
-			Id:   a.flowStore.ID(*flow.Key),
-		})
-	}
-	return flowsToReturn
 }
 
 func (a *Goldmane) Stop() {

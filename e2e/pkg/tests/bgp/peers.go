@@ -39,6 +39,8 @@ var _ = describe.CalicoDescribe(
 	describe.WithTeam(describe.Core),
 	describe.WithFeature("BGPPeer"),
 	describe.WithCategory(describe.Networking),
+	describe.RequiresBGPMesh(),
+	describe.WithSerial(),
 	"BGPPeer",
 	func() {
 		// Define variables common across all tests.
@@ -48,6 +50,7 @@ var _ = describe.CalicoDescribe(
 		var server1 *conncheck.Server
 		var client1 *conncheck.Client
 		var restoreBGPConfig func()
+		var bgpStatus *BGPStatusMonitor
 
 		// Create a new framework for the tests.
 		f := utils.NewDefaultFramework("bgppeer")
@@ -58,9 +61,6 @@ var _ = describe.CalicoDescribe(
 
 			cli, err = client.New(f.ClientConfig())
 			Expect(err).NotTo(HaveOccurred())
-
-			// Ensure a clean starting environment before each test.
-			Expect(utils.CleanDatastore(cli)).ShouldNot(HaveOccurred())
 
 			// We need a minimum of two nodes for BGP peering tests.
 			utils.RequireNodeCount(f, 2)
@@ -73,9 +73,13 @@ var _ = describe.CalicoDescribe(
 			Expect(installation.Spec.CalicoNetwork).NotTo(BeNil(), "CalicoNetwork is not configured in the Installation")
 			Expect(installation.Spec.CalicoNetwork.BGP).NotTo(BeNil(), "BGP is not enabled in the cluster")
 			Expect(*installation.Spec.CalicoNetwork.BGP).To(Equal(v1.BGPEnabled), "BGP is not enabled in the cluster")
+			requireNonVXLANCluster(cli)
 
 			// Ensure full mesh BGP is functioning before each test.
 			restoreBGPConfig = ensureInitialBGPConfig(cli)
+
+			// Set up CalicoNodeStatus resources for BGP diagnostics and convergence waits.
+			bgpStatus = NewBGPStatusMonitor(cli)
 
 			// Before each test, perform the following steps:
 			// - Create a server pod and corresponding service in the main namespace for the test.
@@ -111,6 +115,8 @@ var _ = describe.CalicoDescribe(
 			// Disable full mesh BGP.
 			disableFullMesh(cli)
 
+			bgpStatus.WaitForNoMeshPeers()
+
 			// Verify connectivity is lost.
 			checker.ResetExpectations()
 			checker.ExpectFailure(client1, server1.ClusterIPs()...)
@@ -143,6 +149,8 @@ var _ = describe.CalicoDescribe(
 			ginkgo.By("Deleting the BGPPeer to disable connectivity again")
 			err = cli.Delete(context.Background(), peer)
 			Expect(err).NotTo(HaveOccurred(), "Error deleting BGPPeer resource")
+
+			bgpStatus.WaitForNoPeers()
 
 			// Verify connectivity is lost again.
 			checker.ResetExpectations()

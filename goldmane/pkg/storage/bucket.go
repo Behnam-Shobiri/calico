@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025-2026 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -117,14 +117,9 @@ func (b *AggregationBucket) Reset(start, end int64) {
 	b.stats = newStatisticsIndex()
 
 	if b.Flows == nil {
-		// When resetting a nil bucket, we need to initialize the Flows set.
 		b.Flows = set.New[*DiachronicFlow]()
 	} else {
-		// Otherwise, use the existing set but clear it.
-		b.Flows.Iter(func(item *DiachronicFlow) error {
-			b.Flows.Discard(item)
-			return nil
-		})
+		b.Flows.Clear()
 	}
 }
 
@@ -145,12 +140,11 @@ func (b *AggregationBucket) Iter(fn func(FlowBuilder) bool) {
 		return
 	}
 
-	b.Flows.Iter(func(d *DiachronicFlow) error {
+	for d := range b.Flows.All() {
 		if fn(NewDeferredFlowBuilder(d, b.StartTime, b.EndTime)) {
-			return set.StopIteration
+			break
 		}
-		return nil
-	})
+	}
 }
 
 func (b *AggregationBucket) QueryStatistics(q *proto.StatisticsRequest) map[StatisticsKey]*counts {

@@ -1,4 +1,4 @@
-// Copyright (c) 2017,2021 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,10 +16,10 @@ package namespace_test
 
 import (
 	"context"
-	"os"
+	"fmt"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	api "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	v1 "k8s.io/api/core/v1"
@@ -33,17 +33,19 @@ import (
 	"github.com/projectcalico/calico/libcalico-go/lib/options"
 )
 
-var _ = Describe("Calico namespace controller FV tests (etcd mode)", func() {
+var _ = Describe("Calico namespace controller FV tests (etcd mode)", Ordered, ContinueOnFailure, func() {
 	var (
 		etcd              *containers.Container
-		policyController  *containers.Container
+		kubeControllers   *containers.Container
 		apiserver         *containers.Container
 		calicoClient      client.Interface
 		k8sClient         *kubernetes.Clientset
 		controllerManager *containers.Container
+		kconfigfile       string
+		removeKubeconfig  func()
 	)
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		// Run etcd.
 		etcd = testutils.RunEtcd()
 		calicoClient = testutils.GetCalicoClient(apiconfig.EtcdV3, etcd.IP, "")
@@ -52,20 +54,13 @@ var _ = Describe("Calico namespace controller FV tests (etcd mode)", func() {
 		apiserver = testutils.RunK8sApiserver(etcd.IP)
 
 		// Write out a kubeconfig file
-		kconfigfile, err := os.CreateTemp("", "ginkgo-policycontroller")
-		Expect(err).NotTo(HaveOccurred())
-		defer func() { _ = os.Remove(kconfigfile.Name()) }()
-		data := testutils.BuildKubeconfig(apiserver.IP)
-		_, err = kconfigfile.Write([]byte(data))
-		Expect(err).NotTo(HaveOccurred())
-
-		// Make the kubeconfig readable by the container.
-		Expect(kconfigfile.Chmod(os.ModePerm)).NotTo(HaveOccurred())
+		kconfigfile, removeKubeconfig = testutils.BuildKubeconfig(apiserver.IP)
 
 		// Run the controller.
-		policyController = testutils.RunPolicyController(apiconfig.EtcdV3, etcd.IP, kconfigfile.Name(), "")
+		kubeControllers = testutils.RunKubeControllers(apiconfig.EtcdV3, etcd.IP, kconfigfile, "")
 
-		k8sClient, err = testutils.GetK8sClient(kconfigfile.Name())
+		var err error
+		k8sClient, err = testutils.GetK8sClient(kconfigfile)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wait for the apiserver to be available.
@@ -82,18 +77,20 @@ var _ = Describe("Calico namespace controller FV tests (etcd mode)", func() {
 		controllerManager = testutils.RunK8sControllerManager(apiserver.IP)
 	})
 
-	AfterEach(func() {
+	AfterAll(func() {
 		_ = calicoClient.Close()
 		controllerManager.Stop()
-		policyController.Stop()
+		kubeControllers.Stop()
 		apiserver.Stop()
 		etcd.Stop()
+		removeKubeconfig()
 	})
 
 	Context("Namespace Profile FV tests", func() {
 		var profName string
+		var nsName string
 		BeforeEach(func() {
-			nsName := "peanutbutter"
+			nsName = fmt.Sprintf("peanutbutter-%d", time.Now().UnixNano())
 			profName = "kns." + nsName
 			ns := &v1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
@@ -110,6 +107,10 @@ var _ = Describe("Calico namespace controller FV tests (etcd mode)", func() {
 				profile, _ := calicoClient.Profiles().Get(context.Background(), profName, options.GetOptions{})
 				return profile
 			}, time.Second*15, 500*time.Millisecond).ShouldNot(BeNil())
+		})
+
+		AfterEach(func() {
+			testutils.CleanupK8sNamespaces(context.Background(), k8sClient)
 		})
 
 		It("should write new profiles in etcd to match namespaces in k8s ", func() {
