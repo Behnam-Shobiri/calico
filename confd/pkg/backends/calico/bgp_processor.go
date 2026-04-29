@@ -25,6 +25,7 @@ import (
 	v3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/projectcalico/calico/confd/pkg/backends"
 	"github.com/projectcalico/calico/confd/pkg/backends/types"
 	"github.com/projectcalico/calico/confd/pkg/resource/template"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/encap"
@@ -174,11 +175,14 @@ func (c *client) populateNodeConfig(pc *processorContext, config *types.BirdBGPC
 	switch logLevel {
 	case "none":
 		// DebugMode stays empty (no debug output)
+		// PeerDebugMode stays empty too
 	case "debug":
 		config.DebugMode = "all"
+		config.PeerDebugMode = "debug all;"
 	default:
 		// Default behavior for empty string or any other log level
 		config.DebugMode = "{ states }"
+		config.PeerDebugMode = "debug { states, routes, filters, events };"
 	}
 
 	// Handle router ID logic
@@ -390,6 +394,7 @@ func (c *client) processMeshPeers(pc *processorContext, config *types.BirdBGPCon
 			ASNumber:        peerAS,
 			Type:            "mesh",
 			SourceAddr:      currentNodeIP,
+			TTLSecurity:     "off", // Mesh peers always use ttl security off with multihop
 			Password:        c.getNodeMeshPassword(pc.globalBGPConfig),
 			GracefulRestart: pc.getNodeMeshRestartTime(),
 		}
@@ -455,9 +460,9 @@ func (c *client) processPeersFromPath(peerPath, peerType string, config *types.B
 	logc.Debugf("Found %d peer entries", len(kvPairs))
 
 	// Unmarshal all peers once and separate into remote and local
-	var remotePeers, localPeers []bgpPeer
+	var remotePeers, localPeers []backends.BGPPeer
 	for key, value := range kvPairs {
-		var peerData bgpPeer
+		var peerData backends.BGPPeer
 		if err := json.Unmarshal([]byte(value), &peerData); err != nil {
 			logc.WithError(err).Warnf("Failed to unmarshal peer data for key %s", key)
 			continue
@@ -491,8 +496,8 @@ func (c *client) processPeersFromPath(peerPath, peerType string, config *types.B
 	return nil
 }
 
-// buildPeerFromData constructs a BirdBGPPeer from bgpPeer data
-func (c *client) buildPeerFromData(peer *bgpPeer, prefix string, config *types.BirdBGPConfig, nodeClusterID string, ipVersion int) *types.BirdBGPPeer {
+// buildPeerFromData constructs a BirdBGPPeer from BGPPeer data
+func (c *client) buildPeerFromData(peer *backends.BGPPeer, prefix string, config *types.BirdBGPConfig, nodeClusterID string, ipVersion int) *types.BirdBGPPeer {
 	logc := log.WithField("ipVersion", ipVersion)
 
 	peerIP := peer.PeerIP.String()
@@ -539,9 +544,9 @@ func (c *client) buildPeerFromData(peer *bgpPeer, prefix string, config *types.B
 		result.LocalASNumber = peer.LocalASNum.String()
 	}
 
-	// TTL security
+	// TTL security - store the hop count or "off"
 	if peer.TTLSecurity > 0 {
-		result.TTLSecurity = fmt.Sprintf("on;\n  multihop %d", peer.TTLSecurity)
+		result.TTLSecurity = fmt.Sprintf("%d", peer.TTLSecurity)
 	} else {
 		result.TTLSecurity = "off"
 	}
@@ -746,18 +751,40 @@ func (c *client) buildExportFilter(
 ) string {
 	var filterLines []string
 
-	// Default krt_metric to our normal route priority, if not already set.
+	// Ensure both krt_metric and bgp_local_pref are set for the rest of
+	// the export filter. BGPFilter Priority matching needs bgp_local_pref,
+	// and calico_aggr() needs krt_metric (it checks "krt_metric < 1024"
+	// to let elevated-priority /32s escape aggregation into /26 blocks).
+	//
+	// There are two cases depending on where the route came from:
+	//
+	// Re-exported route (learned via iBGP): this happens when a node acts
+	// as a route reflector (RR) re-advertising iBGP routes to its clients,
+	// or when a node peers with an external eBGP TOR and re-exports iBGP
+	// routes to it. In both cases, bgp_local_pref is already set by the
+	// BGP protocol from the originating node's export. It is the
+	// authoritative source of priority — just use it. We still derive
+	// krt_metric from it so calico_aggr() can check the route's priority.
+	//
+	// Locally-originated route (learned from kernel): krt_metric is set by
+	// Felix (e.g. 512 for elevated, 1024 for normal). For routes without
+	// krt_metric (e.g. static routes for service IP advertisement),
+	// default to the normal route priority. Convert krt_metric →
+	// bgp_local_pref so BGPFilter Priority matching and iBGP transmission
+	// work correctly.
+	// Note: we cannot use `defined(bgp_local_pref)` to distinguish these
+	// cases because BIRD 1.x initializes bgp_local_pref to 100 (the BGP
+	// default) for all routes during BGP export preparation, so it is
+	// always "defined". Instead, use `source = RTS_BGP` which is only
+	// true for routes learned from a BGP peer (iBGP/eBGP), not for
+	// kernel-imported routes (which have source = RTS_INHERIT).
 	filterLines = append(filterLines,
-		fmt.Sprintf("if (!defined(krt_metric)) then { krt_metric = %d; }", normalRoutePriority),
-	)
-
-	// Convert from krt_metric to BGP LOCAL_PREF.  Higher LOCAL_PREF = higher priority, but
-	// lower krt_metric = higher priority, so we invert: bgp_local_pref = INT_MAX - krt_metric.
-	// BGP LOCAL_PREF will only be propagated to iBGP peers; however it's helpful for us to set
-	// the bgp_local_pref attribute for both eBGP and iBGP peers, because then we can implement
-	// the Priority field as a match against bgp_local_pref.
-	filterLines = append(filterLines,
-		fmt.Sprintf("bgp_local_pref = %d - krt_metric;", template.BirdIntMaxValue),
+		"if (defined(source) && source = RTS_BGP && defined(bgp_local_pref)) then {",
+		fmt.Sprintf("  krt_metric = %d - bgp_local_pref;", template.BirdIntMaxValue),
+		"} else {",
+		fmt.Sprintf("  if (!defined(krt_metric)) then { krt_metric = %d; }", normalRoutePriority),
+		fmt.Sprintf("  bgp_local_pref = %d - krt_metric;", template.BirdIntMaxValue),
+		"}",
 	)
 
 	// Determine filter suffix based on IP version
